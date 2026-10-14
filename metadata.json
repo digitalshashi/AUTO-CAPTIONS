@@ -1,0 +1,6 @@
+{
+  "name": "VakyaReel Studio",
+  "description": "Fast multi-language and Tinglish reel caption generator, kinetic typography animator, and burned-in video exporter for Indian languages.",
+  "requestFramePermissions": ["camera", "microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
