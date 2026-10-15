@@ -20,9 +20,12 @@ import {
   Move,
   Layers,
   Trash2,
+  ChevronRight,
+  ChevronLeft,
 } from 'lucide-react';
 import {
   AnimationType,
+  AudioEnhancerConfig,
   CaptionFrameStyle,
   CaptionStyleConfig,
   GradientDirection,
@@ -36,6 +39,14 @@ import {
   GRADIENT_PRESETS,
   INDIAN_LANGUAGE_MATRIX,
 } from '../data/presetsAndLanguages';
+import { DEFAULT_VIDEO_CLIP_EDIT } from '../data/kalakarOptionsData';
+import {
+  KalakarAiAudioTab,
+  KalakarTemplatesTab,
+  KalakarTextAndEffectsTab,
+  KalakarTransitionsTab,
+  KalakarVideoEditTab,
+} from './KalakarRightPanelTabs';
 import { VideoExportFormat } from '../utils/audioExtractor';
 
 const CUSTOM_GRADIENTS_STORAGE_KEY = 'vakyareel_custom_gradients_v1';
@@ -43,6 +54,18 @@ const CUSTOM_GRADIENTS_STORAGE_KEY = 'vakyareel_custom_gradients_v1';
 interface StyleAnimationInspectorProps {
   styleConfig: CaptionStyleConfig;
   presets: StylePreset[];
+  customFonts?: string[];
+  userPlan?: 'free' | 'creator' | 'pro';
+  emphasizedWordCount?: number;
+  selectedLineLabel?: string;
+  audioEnhancer?: AudioEnhancerConfig;
+  audioCleansRemaining?: number;
+  isMuted?: boolean;
+  onToggleMute?: () => void;
+  onUpdateAudioEnhancer?: (partial: Partial<AudioEnhancerConfig>) => void;
+  onUpgradePlan?: () => void;
+  onPreviewTransition?: () => void;
+  onUploadCustomFont?: (file: File) => void;
   onUpdateStyle: (partial: Partial<CaptionStyleConfig>) => void;
   onApplyPreset: (preset: StylePreset) => void;
   onUpdateActivePreset: (customName?: string, customBadgeText?: string) => void;
@@ -52,6 +75,8 @@ interface StyleAnimationInspectorProps {
   onExportVTT: () => void;
   onExportJSON: () => void;
   onExportAudioWAV: () => void;
+  onExportAlphaOverlay?: () => void;
+  onExportPremiereXML?: () => void;
   onExportBurnedVideo: (format?: VideoExportFormat) => void;
   onStopExportNow: () => void;
   exportFormat: VideoExportFormat;
@@ -214,6 +239,22 @@ const CAPTION_FRAME_OPTIONS: {
 export const StyleAnimationInspector: React.FC<StyleAnimationInspectorProps> = ({
   styleConfig,
   presets,
+  customFonts = [],
+  userPlan = 'free',
+  emphasizedWordCount = 6,
+  selectedLineLabel = 'Line 51',
+  audioEnhancer = {
+    enabled: false,
+    noiseReductionDb: 24,
+    voiceClarityBoost: 6,
+  },
+  audioCleansRemaining = 3,
+  isMuted = false,
+  onToggleMute,
+  onUpdateAudioEnhancer,
+  onUpgradePlan,
+  onPreviewTransition,
+  onUploadCustomFont,
   onUpdateStyle,
   onApplyPreset,
   onUpdateActivePreset,
@@ -223,6 +264,8 @@ export const StyleAnimationInspector: React.FC<StyleAnimationInspectorProps> = (
   onExportVTT,
   onExportJSON,
   onExportAudioWAV,
+  onExportAlphaOverlay,
+  onExportPremiereXML,
   onExportBurnedVideo,
   onStopExportNow,
   exportFormat,
@@ -230,9 +273,25 @@ export const StyleAnimationInspector: React.FC<StyleAnimationInspectorProps> = (
   isExportingVideo,
   exportProgress,
 }) => {
+  // Section 4: Collapse arrow on the panel edge hides or shows the right panel
+  const [isRightPanelCollapsed, setIsRightPanelCollapsed] = useState(false);
+
+  // Section 4 & 11: Two top tabs: Captions and Edit (Video clip inspector)
+  const [topPanelMode, setTopPanelMode] = useState<'captions' | 'edit'>('captions');
+
+  const [showProTabs, setShowProTabs] = useState(false);
+
   const [activeTab, setActiveTab] = useState<
-    'easy' | 'gradients' | 'spacing' | 'mask' | 'export'
-  >('easy');
+    | 'templates48'
+    | 'text-effects'
+    | 'transitions'
+    | 'ai-audio'
+    | 'easy'
+    | 'gradients'
+    | 'spacing'
+    | 'mask'
+    | 'export'
+  >('transitions');
 
   const [customGradients, setCustomGradients] = useState<GradientPreset[]>(() => {
     try {
@@ -355,45 +414,215 @@ export const StyleAnimationInspector: React.FC<StyleAnimationInspectorProps> = (
     onUpdateStyle({ smallWordScale: next });
   };
 
+  const activeRatio = styleConfig.aspectRatio || '9:16';
+  const dynamicPanelWidthClass =
+    activeRatio === '16:9'
+      ? 'w-full lg:w-[325px] xl:w-[355px]'
+      : activeRatio === '1:1'
+      ? 'w-full lg:w-[355px] xl:w-[385px]'
+      : 'w-full lg:w-[375px] xl:w-[410px]';
+
+  if (isRightPanelCollapsed) {
+    return (
+      <aside className="order-3 lg:order-3 w-full lg:w-12 shrink-0 border-l border-white/[0.08] bg-[#141417] flex lg:flex-col items-center justify-between lg:justify-start py-2.5 px-3 lg:px-0 lg:py-4 select-none">
+        <button
+          type="button"
+          onClick={() => setIsRightPanelCollapsed(false)}
+          title="Expand Right Panel"
+          className="p-2 rounded-xl bg-[#FF5722] text-white hover:bg-[#F4511E] cursor-pointer shadow-lg flex items-center gap-1.5"
+        >
+          <ChevronLeft className="w-4 h-4" />
+          <span className="lg:hidden text-xs font-bold">Expand Style &amp; Edit Panel</span>
+        </button>
+        <span className="hidden lg:block mt-4 text-[10px] font-bold text-zinc-400 [writing-mode:vertical-rl] tracking-widest uppercase">
+          Captions &amp; Edit Panel
+        </span>
+      </aside>
+    );
+  }
+
   return (
-    <aside className="w-full lg:w-[410px] xl:w-[435px] shrink-0 border-l border-white/[0.08] bg-[#141417]/95 backdrop-blur-2xl flex flex-col h-full select-none">
-      {/* Apple Segmented Control Top Bar (5 Creator Studio Tabs) */}
-      <div className="p-3 border-b border-white/[0.07]">
-        <div className="grid grid-cols-5 gap-1 bg-[#202025] p-1 rounded-2xl">
-          {(
-            [
-              { id: 'easy', label: 'SIDZ', icon: Wand2 },
-              { id: 'gradients', label: 'Gradients', icon: Palette },
-              { id: 'spacing', label: 'Pos & Space', icon: Move },
-              { id: 'mask', label: 'Mask & IG', icon: Layers },
-              { id: 'export', label: 'Export', icon: Download },
-            ] as const
-          ).map((tab) => {
-            const Icon = tab.icon;
-            const isActive = activeTab === tab.id;
-            return (
+    <aside
+      className={`order-3 lg:order-3 ${dynamicPanelWidthClass} shrink-0 border-l border-white/[0.06] bg-[#131317] flex flex-col h-full select-none relative transition-[width] duration-200`}
+    >
+      {/* Collapse Arrow on the Panel Edge (Section 4) */}
+      <button
+        type="button"
+        onClick={() => setIsRightPanelCollapsed(true)}
+        title="Collapse Right Panel"
+        className="hidden lg:flex absolute -left-3.5 top-1/2 -translate-y-1/2 z-30 w-3.5 h-10 rounded-l-md bg-[#1D1D24] hover:bg-[#2BAE66] border border-r-0 border-white/10 items-center justify-center text-zinc-400 hover:text-white cursor-pointer"
+      >
+        <ChevronRight className="w-3 h-3" />
+      </button>
+
+      {/* SECTION 4 & 11: TWO TOP TABS ("Captions" and "Edit") — Exact match to screenshot */}
+      <div className="px-3 pt-2.5 pb-0 border-b border-white/[0.06] space-y-2">
+        <div className="grid grid-cols-2 gap-1 bg-[#18181E] p-1 rounded-lg border border-white/[0.05]">
+          <button
+            type="button"
+            onClick={() => setTopPanelMode('captions')}
+            className={`py-1.5 rounded-md text-xs font-semibold transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+              topPanelMode === 'captions'
+                ? 'bg-[#25252D] text-white shadow-sm'
+                : 'text-zinc-400 hover:text-zinc-200'
+            }`}
+          >
+            <span>Captions</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setTopPanelMode('edit')}
+            className={`py-1.5 rounded-md text-xs font-semibold transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+              topPanelMode === 'edit'
+                ? 'bg-[#25252D] text-white shadow-sm'
+                : 'text-zinc-400 hover:text-zinc-200'
+            }`}
+          >
+            <span>Edit</span>
+          </button>
+        </div>
+
+        {/* Sub-Tabs inside "Captions" Mode: Templates | Text | Transitions | AI Audio */}
+        {topPanelMode === 'captions' && (
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between border-b border-white/[0.04]">
+              {(
+                [
+                  { id: 'templates48', label: 'Templates' },
+                  { id: 'text-effects', label: 'Text' },
+                  { id: 'transitions', label: 'Transitions' },
+                  { id: 'ai-audio', label: 'AI Audio' },
+                ] as const
+              ).map((t) => {
+                const isActive = activeTab === t.id;
+                return (
+                  <button
+                    key={t.id}
+                    type="button"
+                    onClick={() => setActiveTab(t.id)}
+                    className={`py-2 px-2 text-xs font-medium transition-all cursor-pointer border-b-2 -mb-px ${
+                      isActive
+                        ? 'border-[#2BAE66] text-[#34D399] font-semibold'
+                        : 'border-transparent text-zinc-400 hover:text-zinc-200'
+                    }`}
+                  >
+                    {t.label}
+                  </button>
+                );
+              })}
               <button
-                key={tab.id}
                 type="button"
-                onClick={() => setActiveTab(tab.id)}
-                className={`py-2 px-1.5 rounded-xl text-[11px] font-semibold flex flex-col items-center justify-center gap-1 transition-all cursor-pointer whitespace-nowrap shrink-0 ${
-                  isActive
-                    ? 'bg-[#36363F] text-white shadow-sm'
-                    : 'text-zinc-400 hover:text-zinc-200'
+                onClick={() => setShowProTabs((v) => !v)}
+                title="Toggle additional studio tools (Gradients, Spacing, Mask, Export)"
+                className={`px-1.5 py-0.5 rounded text-[10px] font-medium cursor-pointer transition-colors ${
+                  showProTabs
+                    ? 'bg-[#152E23] text-[#34D399] border border-[#2BAE66]/40'
+                    : 'text-zinc-500 hover:text-zinc-300'
                 }`}
               >
-                <Icon className="w-3.5 h-3.5 shrink-0" />
-                <span>{tab.label}</span>
+                {showProTabs ? 'More ▴' : 'More ▾'}
               </button>
-            );
-          })}
-        </div>
+            </div>
+
+            {/* Optional Extra Studio Tools Row */}
+            {showProTabs && (
+              <div className="grid grid-cols-5 gap-1 bg-[#18181E] p-1 rounded-lg mb-2">
+                {(
+                  [
+                    { id: 'easy', label: 'SIDZ', icon: Wand2 },
+                    { id: 'gradients', label: 'Gradients', icon: Palette },
+                    { id: 'spacing', label: 'Spacing', icon: Move },
+                    { id: 'mask', label: 'Mask', icon: Layers },
+                    { id: 'export', label: 'Export', icon: Download },
+                  ] as const
+                ).map((tab) => {
+                  const Icon = tab.icon;
+                  const isActive = activeTab === tab.id;
+                  return (
+                    <button
+                      key={tab.id}
+                      type="button"
+                      onClick={() => setActiveTab(tab.id)}
+                      className={`py-1 px-1 rounded text-[10px] font-medium flex items-center justify-center gap-1 transition-all cursor-pointer whitespace-nowrap shrink-0 ${
+                        isActive
+                          ? 'bg-[#25252D] text-white shadow-sm'
+                          : 'text-zinc-400 hover:text-zinc-200'
+                      }`}
+                    >
+                      <Icon className="w-2.5 h-2.5 shrink-0" />
+                      <span>{tab.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Inspector Body */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-5">
+      <div className="flex-1 overflow-y-auto p-3.5 space-y-4">
+        {/* TOP MODE 2: EDIT TAB (Section 11 — Video Clip Transform, Crop, Composite, Volume) */}
+        {topPanelMode === 'edit' && (
+          <KalakarVideoEditTab
+            videoClipEdit={styleConfig.videoClipEdit || DEFAULT_VIDEO_CLIP_EDIT}
+            isMuted={isMuted}
+            onUpdateVideoClipEdit={(partial) =>
+              onUpdateStyle({
+                videoClipEdit: {
+                  ...(styleConfig.videoClipEdit || DEFAULT_VIDEO_CLIP_EDIT),
+                  ...partial,
+                },
+              })
+            }
+            onToggleMute={() => onToggleMute?.()}
+          />
+        )}
+
+        {/* TOP MODE 1: CAPTIONS SUB-TABS */}
+        {topPanelMode === 'captions' && activeTab === 'templates48' && (
+          <KalakarTemplatesTab
+            styleConfig={styleConfig}
+            userPresets={presets}
+            userPlan={userPlan}
+            onApplyPreset={onApplyPreset}
+            onUpdateStyle={onUpdateStyle}
+            onCreateNewPreset={onCreateNewPreset}
+            onUpgradePlan={onUpgradePlan}
+          />
+        )}
+
+        {topPanelMode === 'captions' && activeTab === 'text-effects' && (
+          <KalakarTextAndEffectsTab
+            styleConfig={styleConfig}
+            customFonts={customFonts}
+            onUpdateStyle={onUpdateStyle}
+          />
+        )}
+
+        {topPanelMode === 'captions' && activeTab === 'transitions' && (
+          <KalakarTransitionsTab
+            styleConfig={styleConfig}
+            emphasizedWordCount={emphasizedWordCount}
+            selectedLineLabel={selectedLineLabel}
+            onUpdateStyle={onUpdateStyle}
+            onPreviewTransition={() => onPreviewTransition?.()}
+          />
+        )}
+
+        {topPanelMode === 'captions' && activeTab === 'ai-audio' && (
+          <KalakarAiAudioTab
+            audioEnhancer={audioEnhancer}
+            audioCleansRemaining={audioCleansRemaining}
+            styleConfig={styleConfig}
+            onUpdateStyle={onUpdateStyle}
+            onUpdateAudioEnhancer={(partial) => onUpdateAudioEnhancer?.(partial)}
+            onExportEnhancedWAV={onExportAudioWAV}
+          />
+        )}
+
         {/* TAB 1: APPLE-STYLE "SIDZ_<NAME>" ALL-IN-ONE CREATOR SHEET */}
-        {activeTab === 'easy' && (
+        {topPanelMode === 'captions' && activeTab === 'easy' && (
           <div className="space-y-4">
             {/* 1. One-Tap SIDZ_<NAME> Presets (Live-Updatable) */}
             <div className="space-y-2">
@@ -714,43 +943,71 @@ export const StyleAnimationInspector: React.FC<StyleAnimationInspectorProps> = (
                 </div>
               </div>
 
-              {/* Direct Font Selectors for Giant Hero Font & Small Lead Font */}
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="text-[10px] text-zinc-400 block mb-1">
-                    Big Hero Font
-                  </label>
-                  <select
-                    value={styleConfig.heroWordFontFamily}
-                    onChange={(e) =>
-                      onUpdateStyle({ heroWordFontFamily: e.target.value })
-                    }
-                    className="w-full bg-[#131318] text-xs font-semibold text-white px-2.5 py-2 rounded-xl border border-white/10 focus:outline-none focus:border-[#0A84FF]"
-                  >
-                    {AVAILABLE_FONTS.map((f) => (
-                      <option key={`hero-${f.name}`} value={f.name}>
-                        {f.name} ({f.category})
-                      </option>
-                    ))}
-                  </select>
+              {/* Direct Font Selectors for Giant Hero Font & Small Lead Font + Custom Font Upload */}
+              <div className="space-y-2">
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="text-[10px] text-zinc-400 block mb-1">
+                      Big Hero Font
+                    </label>
+                    <select
+                      value={styleConfig.heroWordFontFamily}
+                      onChange={(e) =>
+                        onUpdateStyle({ heroWordFontFamily: e.target.value })
+                      }
+                      className="w-full bg-[#131318] text-xs font-semibold text-white px-2.5 py-2 rounded-xl border border-white/10 focus:outline-none focus:border-[#0A84FF]"
+                    >
+                      {customFonts.map((cf) => (
+                        <option key={`hero-cf-${cf}`} value={cf}>
+                          {cf} (Uploaded Custom)
+                        </option>
+                      ))}
+                      {AVAILABLE_FONTS.map((f) => (
+                        <option key={`hero-${f.name}`} value={f.name}>
+                          {f.name} ({f.category})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="text-[10px] text-zinc-400 block mb-1">
+                      Small Lead Font
+                    </label>
+                    <select
+                      value={styleConfig.fontFamily}
+                      onChange={(e) => onUpdateStyle({ fontFamily: e.target.value })}
+                      className="w-full bg-[#131318] text-xs font-semibold text-white px-2.5 py-2 rounded-xl border border-white/10 focus:outline-none focus:border-[#0A84FF]"
+                    >
+                      {customFonts.map((cf) => (
+                        <option key={`small-cf-${cf}`} value={cf}>
+                          {cf} (Uploaded Custom)
+                        </option>
+                      ))}
+                      {AVAILABLE_FONTS.map((f) => (
+                        <option key={`small-${f.name}`} value={f.name}>
+                          {f.name} ({f.category})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
                 </div>
 
-                <div>
-                  <label className="text-[10px] text-zinc-400 block mb-1">
-                    Small Lead Font
+                {onUploadCustomFont && (
+                  <label className="w-full py-1.5 px-3 rounded-xl bg-[#16161F] hover:bg-[#222230] border border-dashed border-[#F59E0B]/40 text-[#F59E0B] text-[11px] font-semibold flex items-center justify-center gap-1.5 cursor-pointer transition-colors">
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Upload Custom Font (.TTF / .OTF / .WOFF2)</span>
+                    <input
+                      type="file"
+                      accept=".ttf,.otf,.woff,.woff2"
+                      className="hidden"
+                      onChange={(e) => {
+                        const f = e.target.files?.[0];
+                        if (f) onUploadCustomFont(f);
+                      }}
+                    />
                   </label>
-                  <select
-                    value={styleConfig.fontFamily}
-                    onChange={(e) => onUpdateStyle({ fontFamily: e.target.value })}
-                    className="w-full bg-[#131318] text-xs font-semibold text-white px-2.5 py-2 rounded-xl border border-white/10 focus:outline-none focus:border-[#0A84FF]"
-                  >
-                    {AVAILABLE_FONTS.map((f) => (
-                      <option key={`small-${f.name}`} value={f.name}>
-                        {f.name} ({f.category})
-                      </option>
-                    ))}
-                  </select>
-                </div>
+                )}
               </div>
 
               {/* Update Active SIDZ_<NAME> Preset or Save as New SIDZ_<NAME> Preset */}
@@ -1289,14 +1546,14 @@ export const StyleAnimationInspector: React.FC<StyleAnimationInspectorProps> = (
                       })
                     }
                     className={`px-2 py-0.5 rounded-md font-bold cursor-pointer transition-all ${
-                      styleConfig.showOnScreenTransformBoxes !== false
+                      styleConfig.showOnScreenTransformBoxes === true
                         ? 'bg-[#FFD60A]/20 text-[#FFD60A] border border-[#FFD60A]/40'
                         : 'bg-[#121216] text-zinc-400 border border-white/10'
                     }`}
                   >
-                    {styleConfig.showOnScreenTransformBoxes !== false
-                      ? 'Handles: ON'
-                      : 'Handles: OFF'}
+                    {styleConfig.showOnScreenTransformBoxes === true
+                      ? 'Guides: ON'
+                      : 'Guides: OFF (Clean Text)'}
                   </button>
                 </div>
                 <div className="grid grid-cols-4 gap-1 bg-[#121216] p-1 rounded-xl">
@@ -2001,6 +2258,73 @@ export const StyleAnimationInspector: React.FC<StyleAnimationInspectorProps> = (
         {/* TAB 4: CAPCUT / PREMIERE / PHOTOSHOP MASK STUDIO & INSTAGRAM FRAMING */}
         {activeTab === 'mask' && (
           <div className="space-y-4">
+            {/* 0. REAL-TIME AI PERSON CUTOUT & BEHIND-HEAD CAPTION DEPTH MASK */}
+            <div className="p-3.5 rounded-2xl bg-[#162720] border border-[#2BAE66]/50 space-y-3">
+              <div className="flex items-center justify-between gap-2">
+                <div>
+                  <h2 className="text-xs font-semibold text-white flex items-center gap-1.5">
+                    <Layers className="w-3.5 h-3.5 text-[#34D399]" />
+                    <span>AI Person Cutout (Behind-Head Depth Mask)</span>
+                  </h2>
+                  <p className="text-[10px] text-[#34D399]/90 mt-0.5">
+                    Automatically places medical &amp; creator captions in the background behind the speaker&apos;s head
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const nextDepth = !styleConfig.captionDepthBehindSubject;
+                    onUpdateStyle({
+                      captionDepthBehindSubject: nextDepth,
+                      ...(nextDepth ? { positionY: 31 } : {}),
+                    });
+                  }}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer shrink-0 ${
+                    styleConfig.captionDepthBehindSubject
+                      ? 'bg-[#2BAE66] text-white shadow-sm'
+                      : 'bg-[#111F19] text-zinc-300 hover:text-white border border-white/10'
+                  }`}
+                >
+                  {styleConfig.captionDepthBehindSubject
+                    ? 'DEPTH MASK ON'
+                    : 'ENABLE DEPTH'}
+                </button>
+              </div>
+
+              <div className="grid grid-cols-3 gap-1.5">
+                {(
+                  [
+                    { label: 'Crown (25% Y)', y: 25 },
+                    { label: 'Behind Head (31%)', y: 31 },
+                    { label: 'Shoulders (42% Y)', y: 42 },
+                  ] as const
+                ).map((preset) => {
+                  const active =
+                    styleConfig.captionDepthBehindSubject &&
+                    Math.abs((styleConfig.positionY ?? 31) - preset.y) <= 4;
+                  return (
+                    <button
+                      key={preset.label}
+                      type="button"
+                      onClick={() =>
+                        onUpdateStyle({
+                          captionDepthBehindSubject: true,
+                          positionY: preset.y,
+                        })
+                      }
+                      className={`py-1.5 px-2 rounded-lg text-[10px] font-semibold transition-all cursor-pointer border ${
+                        active
+                          ? 'bg-[#2BAE66] border-[#34D399] text-white'
+                          : 'bg-[#111F19] border-white/10 text-zinc-300 hover:text-white'
+                      }`}
+                    >
+                      {preset.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
             {/* 1. Instagram Photo Frame (Moves with Text) & Full Instagram Reels UI Overlay */}
             <div className="p-3.5 rounded-2xl bg-[#1C1C22] border border-pink-500/35 space-y-3">
               <div className="flex items-center justify-between">
@@ -2518,6 +2842,48 @@ export const StyleAnimationInspector: React.FC<StyleAnimationInspectorProps> = (
                 </div>
                 <span className="text-xs font-mono-tabular text-zinc-400">.json</span>
               </button>
+
+              {onExportAlphaOverlay && (
+                <button
+                  type="button"
+                  onClick={onExportAlphaOverlay}
+                  className="w-full p-3.5 rounded-2xl bg-[#1C1C22] hover:bg-[#25252D] border border-[#38BDF8]/30 flex items-center justify-between transition-colors cursor-pointer"
+                >
+                  <div className="flex items-center gap-2.5 text-left">
+                    <Layers className="w-4 h-4 text-[#38BDF8]" />
+                    <div>
+                      <div className="text-xs font-semibold text-white">
+                        Export Transparent Alpha Overlay (.WEBM)
+                      </div>
+                      <div className="text-[11px] text-zinc-400">
+                        Transparent caption track for Premiere Pro &amp; DaVinci Resolve
+                      </div>
+                    </div>
+                  </div>
+                  <span className="text-xs font-mono-tabular text-[#38BDF8]">alpha</span>
+                </button>
+              )}
+
+              {onExportPremiereXML && (
+                <button
+                  type="button"
+                  onClick={onExportPremiereXML}
+                  className="w-full p-3.5 rounded-2xl bg-[#1C1C22] hover:bg-[#25252D] border border-[#F59E0B]/30 flex items-center justify-between transition-colors cursor-pointer"
+                >
+                  <div className="flex items-center gap-2.5 text-left">
+                    <FileCode className="w-4 h-4 text-[#F59E0B]" />
+                    <div>
+                      <div className="text-xs font-semibold text-white">
+                        Export Premiere Pro / DaVinci XML (.FCPXML)
+                      </div>
+                      <div className="text-[11px] text-zinc-400">
+                        Native NLE timeline with synced Desi subtitle tracks
+                      </div>
+                    </div>
+                  </div>
+                  <span className="text-xs font-mono-tabular text-[#F59E0B]">.fcpxml</span>
+                </button>
+              )}
             </div>
           </div>
         )}

@@ -1,4 +1,11 @@
 import { CaptionSegment, CaptionStyleConfig, SampleReel, WordTiming } from '../types/caption';
+import {
+  renderForegroundSubjectCutoutLayer,
+  updateVideoSubjectDepthMatte,
+} from './depthSubjectSegmentation';
+
+let lastValidVideoFrameCanvas: HTMLCanvasElement | null = null;
+let lastValidVideoSrc = '';
 
 function hexToRgba(hex: string, alpha: number): string {
   const clean = (hex || '#000000').replace('#', '');
@@ -32,6 +39,7 @@ function drawRoundedRect(
 
 function transformWord(word: string, mode: CaptionStyleConfig['textTransform']): string {
   if (mode === 'uppercase') return word.toUpperCase();
+  if (mode === 'lowercase') return word.toLowerCase();
   if (mode === 'capitalize') {
     return word.charAt(0).toUpperCase() + word.slice(1);
   }
@@ -39,7 +47,7 @@ function transformWord(word: string, mode: CaptionStyleConfig['textTransform']):
 }
 
 function getWordFontStack(family: string): string {
-  return `"${family}", "Noto Sans Telugu", "Noto Sans Devanagari", "Noto Sans Tamil", "Noto Sans Kannada", "Noto Sans Malayalam", "Plus Jakarta Sans", sans-serif`;
+  return `"${family}", "Noto Sans Arabic", "Noto Sans Telugu", "Noto Sans Devanagari", "Noto Sans Tamil", "Noto Sans Kannada", "Noto Sans Malayalam", "Plus Jakarta Sans", sans-serif`;
 }
 
 function applyCanvasLetterSpacing(ctx: CanvasRenderingContext2D, px: number | undefined) {
@@ -682,17 +690,23 @@ function renderSidzCompositeCaption(
   const letterSpace = Number(style.letterSpacing ?? 0);
   const lineSpaceMult = Number(style.lineSpacing ?? 1.18);
 
+  const aspectFontScale =
+    canvasHeight <= 760 ? (canvasWidth > canvasHeight ? 0.84 : 0.88) : 1.0;
+  const effectiveBaseFontSize = Math.round(style.fontSize * aspectFontScale);
+
   const small1FontSize = Math.max(
     13,
-    Math.round(style.fontSize * (style.smallWordScale || 0.68))
+    Math.round(effectiveBaseFontSize * (style.smallWordScale || 0.68))
   );
   const small2FontSize = Math.max(
     13,
-    Math.round(style.fontSize * (style.smallLine2Scale ?? style.smallWordScale ?? 0.68))
+    Math.round(
+      effectiveBaseFontSize * (style.smallLine2Scale ?? style.smallWordScale ?? 0.68)
+    )
   );
   const rawGiantFontSize = Math.max(
     26,
-    Math.round(style.fontSize * (style.bigWordScale || 2.15))
+    Math.round(effectiveBaseFontSize * (style.bigWordScale || 2.15))
   );
 
   const isHeroCurrentlySpoken = words
@@ -1032,87 +1046,249 @@ function drawSampleReelBackdrop(
   width: number,
   height: number,
   currentTime: number,
-  sampleReel: SampleReel
+  sampleReel: SampleReel,
+  includeForegroundSubject = true
 ) {
-  // Bright studio window key-light + soft editorial room backdrop inspired by creator studio reels
-  const grad = ctx.createLinearGradient(0, 0, width, height);
-  grad.addColorStop(0, '#2B2D38');
-  grad.addColorStop(0.45, '#1D1F27');
-  grad.addColorStop(1, '#0E0F14');
-  ctx.fillStyle = grad;
+  ctx.save();
+
+  // 1. Deep charcoal pleated studio acoustic curtains background
+  const bgGrad = ctx.createLinearGradient(0, 0, width, height);
+  bgGrad.addColorStop(0, '#2A2E35');
+  bgGrad.addColorStop(0.5, '#1D2026');
+  bgGrad.addColorStop(1, '#101216');
+  ctx.fillStyle = bgGrad;
   ctx.fillRect(0, 0, width, height);
 
-  // Soft warm studio window panels in upper background
+  // Subtle vertical curtain folds
+  for (let i = 0; i < 9; i++) {
+    const foldX = (width / 9) * i;
+    const foldW = width / 9;
+    const foldGrad = ctx.createLinearGradient(foldX, 0, foldX + foldW, 0);
+    foldGrad.addColorStop(0, 'rgba(0, 0, 0, 0.28)');
+    foldGrad.addColorStop(0.45, 'rgba(255, 255, 255, 0.04)');
+    foldGrad.addColorStop(1, 'rgba(0, 0, 0, 0.34)');
+    ctx.fillStyle = foldGrad;
+    ctx.fillRect(foldX, 0, foldW, height);
+  }
+
+  // 2. Warm glowing studio table lamp on the right (matching screenshot)
+  const lampX = width * 0.85;
+  const lampY = height * 0.36;
+  const haloGrad = ctx.createRadialGradient(
+    lampX,
+    lampY,
+    width * 0.04,
+    lampX,
+    lampY,
+    width * 0.62
+  );
+  haloGrad.addColorStop(0, 'rgba(255, 244, 196, 0.88)');
+  haloGrad.addColorStop(0.22, 'rgba(251, 191, 36, 0.34)');
+  haloGrad.addColorStop(0.58, 'rgba(245, 158, 11, 0.09)');
+  haloGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+  ctx.fillStyle = haloGrad;
+  ctx.fillRect(0, 0, width, height);
+
+  // Lamp brass stand & cream drum shade
+  ctx.fillStyle = '#B45309';
+  ctx.fillRect(lampX - 4, lampY + 52, 8, height * 0.25);
+  ctx.fillStyle = '#78350F';
+  drawRoundedRect(ctx, lampX - 18, lampY + 64, 36, 12, 4);
+  ctx.fill();
+
+  const shadeGrad = ctx.createLinearGradient(lampX - 65, lampY - 58, lampX + 65, lampY + 58);
+  shadeGrad.addColorStop(0, '#FFFBEB');
+  shadeGrad.addColorStop(0.5, '#FEF3C7');
+  shadeGrad.addColorStop(1, '#FDE68A');
+  ctx.fillStyle = shadeGrad;
+  ctx.shadowColor = 'rgba(251, 191, 36, 0.65)';
+  ctx.shadowBlur = 32;
+  drawRoundedRect(ctx, lampX - 64, lampY - 62, 138, 116, 10);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+
+  // 3. Lush tropical indoor palm fronds in top-left corner (matching screenshot)
   ctx.save();
-  ctx.fillStyle = 'rgba(255, 250, 240, 0.04)';
-  drawRoundedRect(ctx, 48, 48, width * 0.4, height * 0.36, 16);
-  ctx.fill();
-  drawRoundedRect(ctx, width * 0.52, 48, width * 0.4, height * 0.36, 16);
-  ctx.fill();
+  const sway = Math.sin(currentTime * 1.4) * 3;
+  ctx.translate(-10, height * 0.04 + sway);
+  const frondAngles = [-0.45, -0.22, 0.02, 0.26, 0.5, 0.75];
+  frondAngles.forEach((ang, idx) => {
+    ctx.save();
+    ctx.rotate(ang);
+    // Main stem
+    ctx.strokeStyle = idx % 2 === 0 ? '#65A30D' : '#4D7C0F';
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.quadraticCurveTo(width * 0.16, -18, width * 0.34, 14);
+    ctx.stroke();
+
+    // Leaflets along the stem
+    for (let l = 1; l <= 11; l++) {
+      const lx = (width * 0.32 * l) / 11;
+      const ly = -8 + (l - 5) * 1.8;
+      ctx.fillStyle = l % 2 === 0 ? '#84CC16' : '#4D7C0F';
+      ctx.beginPath();
+      ctx.ellipse(lx, ly - 16, 26, 5.5, -0.55, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.ellipse(lx, ly + 16, 26, 5.5, 0.55, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  });
   ctx.restore();
 
-  // Subtle animated studio light orb
-  const orb1X = width * (0.5 + 0.24 * Math.sin(currentTime * 0.9));
-  const orb1Y = height * (0.32 + 0.1 * Math.cos(currentTime * 0.7));
-  const radGrad = ctx.createRadialGradient(orb1X, orb1Y, 10, orb1X, orb1Y, width * 0.65);
-  radGrad.addColorStop(0, hexToRgba(sampleReel.accentColor, 0.18));
-  radGrad.addColorStop(1, 'rgba(0,0,0,0)');
-  ctx.fillStyle = radGrad;
-  ctx.fillRect(0, 0, width, height);
-
-  // Animated creator vocal waveform visualizer in upper-center
-  const centerX = width / 2;
-  const waveCenterY = height * 0.28;
-
-  const pulse = 1 + 0.04 * Math.sin(currentTime * 8);
-  ctx.save();
-  ctx.beginPath();
-  ctx.arc(centerX, waveCenterY - 85, 50 * pulse, 0, Math.PI * 2);
-  ctx.strokeStyle = hexToRgba(sampleReel.accentColor, 0.65);
-  ctx.lineWidth = 3;
-  ctx.stroke();
-
-  ctx.beginPath();
-  ctx.arc(centerX, waveCenterY - 85, 42, 0, Math.PI * 2);
-  ctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
+  // 4. Dark charcoal studio armchair behind the creator
+  const chairCenterX = width * 0.48;
+  const chairTopY = height * 0.53;
+  const chairGrad = ctx.createLinearGradient(0, chairTopY, 0, height);
+  chairGrad.addColorStop(0, '#2C313A');
+  chairGrad.addColorStop(0.5, '#1F232A');
+  chairGrad.addColorStop(1, '#12151A');
+  ctx.fillStyle = chairGrad;
+  // Chair backrest
+  drawRoundedRect(ctx, width * 0.08, chairTopY, width * 0.78, height * 0.46, 36);
+  ctx.fill();
+  // Left & right plush armrests
+  ctx.fillStyle = '#252932';
+  drawRoundedRect(ctx, width * 0.02, height * 0.67, width * 0.22, height * 0.33, 28);
+  ctx.fill();
+  drawRoundedRect(ctx, width * 0.72, height * 0.68, width * 0.24, height * 0.32, 28);
   ctx.fill();
 
-  ctx.fillStyle = '#FFFFFF';
-  ctx.font = '700 18px "Bricolage Grotesque", sans-serif';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText('SIDZ', centerX, waveCenterY - 85);
-
-  ctx.font = '600 17px "Plus Jakarta Sans", sans-serif';
-  ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
-  ctx.fillText(sampleReel.title, centerX, waveCenterY - 12);
-
-  ctx.font = '500 12px "Plus Jakarta Sans", sans-serif';
-  ctx.fillStyle = 'rgba(161, 161, 170, 0.9)';
-  ctx.fillText(`${sampleReel.creator}`, centerX, waveCenterY + 12);
-
-  // Dynamic equalizer bars
-  const barCount = 27;
-  const barWidth = 5;
-  const barGap = 6;
-  const totalWaveWidth = barCount * (barWidth + barGap) - barGap;
-  const startX = centerX - totalWaveWidth / 2;
-
-  for (let i = 0; i < barCount; i++) {
-    const distFromCenter = Math.abs(i - (barCount - 1) / 2) / ((barCount - 1) / 2);
-    const envelope = Math.max(0.15, 1 - distFromCenter * 0.75);
-    const wave =
-      Math.abs(Math.sin(currentTime * 9.5 + i * 0.45)) *
-      Math.abs(Math.cos(currentTime * 5.2 - i * 0.25));
-    const barHeight = Math.max(6, (12 + wave * 52) * envelope);
-    const bx = startX + i * (barWidth + barGap);
-    const by = waveCenterY + 56 - barHeight / 2;
-
-    ctx.fillStyle =
-      wave > 0.45 ? sampleReel.accentColor : 'rgba(255, 255, 255, 0.3)';
-    drawRoundedRect(ctx, bx, by, barWidth, barHeight, 3);
-    ctx.fill();
+  if (includeForegroundSubject) {
+    drawSampleReelForegroundSubject(ctx, width, height, currentTime);
   }
+  ctx.restore();
+}
+
+function drawSampleReelForegroundSubject(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  currentTime: number
+) {
+  ctx.save();
+  const chairCenterX = width * 0.48;
+  // 5. Podcast Creator Subject (Seated in center, black hoodie, glasses, beard, speaking gesture)
+  const headX = chairCenterX - width * 0.02;
+  const headY = height * 0.45 + Math.sin(currentTime * 3.2) * 2.5;
+  const headW = width * 0.19;
+  const headH = height * 0.135;
+
+  // Ambient depth shadow cast onto any behind-head captions
+  ctx.shadowColor = 'rgba(0, 0, 0, 0.58)';
+  ctx.shadowBlur = 16;
+  ctx.shadowOffsetY = -2;
+
+  // Black hoodie shoulders & torso
+  const hoodieGrad = ctx.createLinearGradient(
+    headX - width * 0.28,
+    height * 0.54,
+    headX + width * 0.28,
+    height * 0.94
+  );
+  hoodieGrad.addColorStop(0, '#181A20');
+  hoodieGrad.addColorStop(0.6, '#101216');
+  hoodieGrad.addColorStop(1, '#090A0D');
+  ctx.fillStyle = hoodieGrad;
+  ctx.beginPath();
+  ctx.moveTo(headX - width * 0.28, height * 0.96);
+  ctx.quadraticCurveTo(headX - width * 0.27, height * 0.56, headX - width * 0.09, height * 0.54);
+  ctx.lineTo(headX + width * 0.11, height * 0.54);
+  ctx.quadraticCurveTo(headX + width * 0.29, height * 0.56, headX + width * 0.3, height * 0.96);
+  ctx.closePath();
+  ctx.fill();
+
+  // Subtle gold LOKESH chest emblem on hoodie
+  ctx.fillStyle = '#EAB308';
+  ctx.font = '700 11px "Plus Jakarta Sans", sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('LOKESH', headX + width * 0.1, height * 0.64);
+
+  // Neck
+  ctx.fillStyle = '#C68B63';
+  drawRoundedRect(ctx, headX - width * 0.045, headY + headH * 0.55, width * 0.09, height * 0.06, 10);
+  ctx.fill();
+
+  // Voluminous dark wavy hair
+  ctx.fillStyle = '#111317';
+  ctx.beginPath();
+  ctx.ellipse(headX, headY - headH * 0.14, headW * 0.66, headH * 0.58, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Face contour with warm studio key light
+  const skinGrad = ctx.createLinearGradient(headX - headW * 0.5, headY, headX + headW * 0.5, headY);
+  skinGrad.addColorStop(0, '#B87A52');
+  skinGrad.addColorStop(0.65, '#D99B72');
+  skinGrad.addColorStop(1, '#E6AE86');
+  ctx.fillStyle = skinGrad;
+  ctx.beginPath();
+  ctx.ellipse(headX, headY, headW * 0.52, headH * 0.52, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Full groomed beard & mustache
+  ctx.fillStyle = '#181A1F';
+  ctx.beginPath();
+  ctx.arc(headX, headY + headH * 0.08, headW * 0.51, 0.12 * Math.PI, 0.88 * Math.PI);
+  ctx.closePath();
+  ctx.fill();
+
+  // Animated speaking mouth inside beard
+  const mouthOpen = 3 + Math.abs(Math.sin(currentTime * 9.5)) * 7;
+  ctx.fillStyle = '#7F1D1D';
+  drawRoundedRect(ctx, headX - 11, headY + headH * 0.22, 22, mouthOpen, 4);
+  ctx.fill();
+
+  // Rectangular dark-frame glasses with subtle warm lamp reflection
+  ctx.strokeStyle = '#111318';
+  ctx.lineWidth = 3.2;
+  drawRoundedRect(ctx, headX - headW * 0.42, headY - headH * 0.14, headW * 0.36, headH * 0.22, 5);
+  ctx.stroke();
+  drawRoundedRect(ctx, headX + headW * 0.06, headY - headH * 0.14, headW * 0.36, headH * 0.22, 5);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(headX - headW * 0.06, headY - headH * 0.04);
+  ctx.lineTo(headX + headW * 0.06, headY - headH * 0.04);
+  ctx.stroke();
+
+  // Expressive gesturing hand in center-front (matching screenshot)
+  const handY = height * 0.61 + Math.sin(currentTime * 4.5) * 4;
+  ctx.fillStyle = '#D99B72';
+  drawRoundedRect(ctx, headX - 14, handY, 38, 48, 14);
+  ctx.fill();
+
+  // 6. Studio Condenser Podcast Microphone & Boom Arm on right
+  const micX = width * 0.65;
+  const micY = height * 0.55;
+  ctx.strokeStyle = '#1E2028';
+  ctx.lineWidth = 10;
+  ctx.beginPath();
+  ctx.moveTo(width * 0.96, height * 0.72);
+  ctx.lineTo(micX + 18, micY + 42);
+  ctx.stroke();
+
+  ctx.save();
+  ctx.translate(micX, micY);
+  ctx.rotate(-0.35);
+  ctx.fillStyle = '#181A20';
+  ctx.strokeStyle = '#3F4454';
+  ctx.lineWidth = 2;
+  drawRoundedRect(ctx, -18, -38, 36, 76, 16);
+  ctx.fill();
+  ctx.stroke();
+  // Mic mesh grille lines
+  ctx.strokeStyle = 'rgba(255,255,255,0.16)';
+  ctx.lineWidth = 1;
+  for (let m = -28; m <= 0; m += 6) {
+    ctx.beginPath();
+    ctx.moveTo(-14, m);
+    ctx.lineTo(14, m);
+    ctx.stroke();
+  }
+  ctx.restore();
+
   ctx.restore();
 }
 
@@ -1127,6 +1303,21 @@ export function renderReelCanvasFrame(params: {
   segments: CaptionSegment[];
   style: CaptionStyleConfig;
   isExportRender?: boolean;
+  transparentAlphaOnly?: boolean;
+  isVideo1Visible?: boolean;
+  isCaptionsVisible?: boolean;
+  activeTimelineBroll?: {
+    label: string;
+    startTime: number;
+    endTime: number;
+    brollPrompt?: string;
+    brollEffect?: string;
+  } | null;
+  activeTimelineVideo2?: {
+    label: string;
+    startTime: number;
+    endTime: number;
+  } | null;
 }) {
   const {
     ctx,
@@ -1139,6 +1330,11 @@ export function renderReelCanvasFrame(params: {
     segments,
     style,
     isExportRender = false,
+    transparentAlphaOnly = false,
+    isVideo1Visible = true,
+    isCaptionsVisible = true,
+    activeTimelineBroll = null,
+    activeTimelineVideo2 = null,
   } = params;
 
   if (!isExportRender) {
@@ -1146,63 +1342,364 @@ export function renderReelCanvasFrame(params: {
   }
 
   ctx.clearRect(0, 0, canvasWidth, canvasHeight);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
 
-  // 1. Draw Video Frame or Sample Reel Backdrop
-  if (hasUploadedVideo && videoElement && videoElement.readyState >= 2) {
-    const vw = videoElement.videoWidth || canvasWidth;
-    const vh = videoElement.videoHeight || canvasHeight;
-    const canvasRatio = canvasWidth / canvasHeight;
-    const videoRatio = vw / vh;
+  // Uniform logical coordinate space for 9:16 (720x1280), 16:9 (1280x720), and 1:1 (720x720)
+  // Prevents any horizontal/vertical aspect ratio stretching!
+  const uniformScale = Math.min(canvasWidth, canvasHeight) / 720;
+  const logicalW = Math.round(canvasWidth / uniformScale);
+  const logicalH = Math.round(canvasHeight / uniformScale);
+  const scaleX = canvasWidth / logicalW;
+  const scaleY = canvasHeight / logicalH;
 
-    ctx.fillStyle = '#05060A';
-    ctx.fillRect(0, 0, canvasWidth, canvasHeight);
-
-    let drawW = canvasWidth;
-    let drawH = canvasHeight;
-    let offsetX = 0;
-    let offsetY = 0;
-
-    if (videoRatio > canvasRatio) {
-      drawH = canvasHeight;
-      drawW = canvasHeight * videoRatio;
-      offsetX = (canvasWidth - drawW) / 2;
+  // 1. Draw Video Frame at Full Physical Resolution (with Section 11 VideoClipEdit Transform/Crop/Opacity) or Sample Reel Backdrop
+  if (!transparentAlphaOnly) {
+    if (!isVideo1Visible) {
+      // Video 1 is cut/deleted at this timestamp or hidden via Eye toggle while Audio 1 may still play
+      ctx.save();
+      ctx.fillStyle = '#07080C';
+      ctx.fillRect(0, 0, canvasWidth, canvasHeight);
+      ctx.scale(scaleX, scaleY);
+      ctx.fillStyle = 'rgba(255,255,255,0.22)';
+      ctx.font = '700 18px "JetBrains Mono", monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('VIDEO 1 CUT / HIDDEN AT PLAYHEAD', logicalW / 2, logicalH * 0.42);
+      ctx.restore();
     } else {
-      drawW = canvasWidth;
-      drawH = canvasWidth / videoRatio;
-      offsetY = (canvasHeight - drawH) / 2;
+      const clipEdit = style.videoClipEdit;
+      ctx.save();
+      if (clipEdit) {
+        ctx.globalAlpha = Math.max(0.05, Math.min(1, (clipEdit.opacity ?? 100) / 100));
+        if (
+          clipEdit.cropLeft > 0 ||
+          clipEdit.cropRight > 0 ||
+          clipEdit.cropTop > 0 ||
+          clipEdit.cropBottom > 0 ||
+          clipEdit.cropRounded > 0
+        ) {
+          const cl = (clipEdit.cropLeft / 100) * canvasWidth;
+          const cr = (clipEdit.cropRight / 100) * canvasWidth;
+          const ct = (clipEdit.cropTop / 100) * canvasHeight;
+          const cb = (clipEdit.cropBottom / 100) * canvasHeight;
+          const cw = Math.max(40, canvasWidth - cl - cr);
+          const ch = Math.max(40, canvasHeight - ct - cb);
+          drawRoundedRect(ctx, cl, ct, cw, ch, clipEdit.cropRounded || 0);
+          ctx.clip();
+        }
+        ctx.translate(
+          canvasWidth / 2 + (clipEdit.positionX || 0),
+          canvasHeight / 2 + (clipEdit.positionY || 0)
+        );
+        if (clipEdit.rotation) {
+          ctx.rotate((clipEdit.rotation * Math.PI) / 180);
+        }
+        const sx =
+          ((clipEdit.zoomX || 100) / 100) * (clipEdit.flipHorizontal ? -1 : 1);
+        const sy =
+          ((clipEdit.zoomY || 100) / 100) * (clipEdit.flipVertical ? -1 : 1);
+        ctx.scale(sx, sy);
+        ctx.translate(-canvasWidth / 2, -canvasHeight / 2);
+      }
+
+      if (hasUploadedVideo && videoElement) {
+        ctx.fillStyle = '#05060A';
+        ctx.fillRect(0, 0, canvasWidth, canvasHeight);
+
+        if (videoElement.readyState >= 2 && videoElement.videoWidth > 0 && videoElement.videoHeight > 0) {
+          const vw = videoElement.videoWidth;
+          const vh = videoElement.videoHeight;
+          const canvasRatio = canvasWidth / canvasHeight;
+          const videoRatio = vw / vh;
+
+          // If canvas and video have different aspect ratios (e.g. viewing 9:16 video on 16:9 canvas or vice versa),
+          // first draw a soft dimmed ambient backdrop, then draw the 100% complete original video frame (contain)
+          // so the original 9:16 or 16:9 preview is ALWAYS shown in full without cropping!
+          if (Math.abs(videoRatio - canvasRatio) > 0.08) {
+            ctx.save();
+            ctx.globalAlpha = 0.28;
+            let bgW = canvasWidth;
+            let bgH = canvasHeight;
+            if (videoRatio > canvasRatio) {
+              bgH = canvasHeight;
+              bgW = canvasHeight * videoRatio;
+            } else {
+              bgW = canvasWidth;
+              bgH = canvasWidth / videoRatio;
+            }
+            ctx.drawImage(
+              videoElement,
+              (canvasWidth - bgW) / 2,
+              (canvasHeight - bgH) / 2,
+              bgW,
+              bgH
+            );
+            ctx.restore();
+          }
+
+          // Calculate exact uncropped fit (contain) so the entire original video frame is visible
+          let drawW = canvasWidth;
+          let drawH = canvasHeight;
+          let offsetX = 0;
+          let offsetY = 0;
+
+          if (videoRatio > canvasRatio) {
+            // Video is wider than canvas: fit full width, letterbox top/bottom
+            drawW = canvasWidth;
+            drawH = canvasWidth / videoRatio;
+            offsetY = (canvasHeight - drawH) / 2;
+          } else {
+            // Video is taller/equal to canvas: fit full height, pillarbox left/right
+            drawH = canvasHeight;
+            drawW = canvasHeight * videoRatio;
+            offsetX = (canvasWidth - drawW) / 2;
+          }
+
+          ctx.drawImage(videoElement, offsetX, offsetY, drawW, drawH);
+
+          // Cache this decoded frame so rapid second-by-second scrubbing never flashes blank
+          if (typeof document !== 'undefined') {
+            if (
+              !lastValidVideoFrameCanvas ||
+              lastValidVideoFrameCanvas.width !== canvasWidth ||
+              lastValidVideoFrameCanvas.height !== canvasHeight
+            ) {
+              lastValidVideoFrameCanvas = document.createElement('canvas');
+              lastValidVideoFrameCanvas.width = canvasWidth;
+              lastValidVideoFrameCanvas.height = canvasHeight;
+            }
+            const cacheCtx = lastValidVideoFrameCanvas.getContext('2d');
+            if (cacheCtx) {
+              cacheCtx.clearRect(0, 0, canvasWidth, canvasHeight);
+              cacheCtx.drawImage(ctx.canvas, 0, 0, canvasWidth, canvasHeight);
+              lastValidVideoSrc = videoElement.currentSrc || videoElement.src || 'uploaded';
+            }
+          }
+        } else if (
+          lastValidVideoFrameCanvas &&
+          lastValidVideoSrc === (videoElement.currentSrc || videoElement.src || 'uploaded')
+        ) {
+          // While HTMLVideoElement is mid-seek between seconds, keep displaying the last decoded video frame
+          ctx.drawImage(lastValidVideoFrameCanvas, 0, 0, canvasWidth, canvasHeight);
+        }
+      } else {
+        ctx.save();
+        ctx.scale(scaleX, scaleY);
+        // When Depth Mask is ON, draw only the background plate in Layer 1; the creator subject renders in Layer 3 on top of captions!
+        drawSampleReelBackdrop(
+          ctx,
+          logicalW,
+          logicalH,
+          currentTime,
+          sampleReel,
+          !style.captionDepthBehindSubject
+        );
+        ctx.restore();
+      }
+      ctx.restore();
     }
-    ctx.drawImage(videoElement, offsetX, offsetY, drawW, drawH);
-  } else {
-    drawSampleReelBackdrop(ctx, canvasWidth, canvasHeight, currentTime, sampleReel);
+  }
+
+  ctx.save();
+  ctx.scale(scaleX, scaleY);
+
+  // 1.5 Draw Timeline B-Roll 1 / Video 2 Cutaway Card when active on the Multi-Track Timeline
+  if (!transparentAlphaOnly && (activeTimelineBroll || activeTimelineVideo2)) {
+    const clip = activeTimelineBroll || activeTimelineVideo2;
+    if (clip) {
+      ctx.save();
+      const prog = Math.max(
+        0,
+        Math.min(
+          1,
+          (currentTime - clip.startTime) / Math.max(0.3, clip.endTime - clip.startTime)
+        )
+      );
+      const isBroll = Boolean(activeTimelineBroll);
+      const cardW = logicalW * 0.84;
+      const cardH = logicalH * 0.16;
+      const cardX = (logicalW - cardW) / 2;
+      const cardY = logicalH * 0.11;
+
+      const zoomScale = 1 + Math.sin(prog * Math.PI) * 0.035;
+      ctx.translate(cardX + cardW / 2, cardY + cardH / 2);
+      ctx.scale(zoomScale, zoomScale);
+      ctx.translate(-(cardX + cardW / 2), -(cardY + cardH / 2));
+
+      ctx.fillStyle = 'rgba(15, 18, 26, 0.92)';
+      ctx.shadowColor = 'rgba(0, 0, 0, 0.75)';
+      ctx.shadowBlur = 22;
+      drawRoundedRect(ctx, cardX, cardY, cardW, cardH, 18);
+      ctx.fill();
+      ctx.shadowBlur = 0;
+
+      ctx.strokeStyle = isBroll
+        ? 'rgba(245, 158, 11, 0.8)'
+        : 'rgba(168, 85, 247, 0.8)';
+      ctx.lineWidth = 2.2;
+      ctx.stroke();
+
+      ctx.fillStyle = isBroll ? '#F59E0B' : '#C084FC';
+      ctx.font = '800 12px "JetBrains Mono", monospace';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(
+        isBroll
+          ? `🎬 B-ROLL 1 TRACK · ${(activeTimelineBroll?.brollEffect || 'KEN-BURNS').toUpperCase()}`
+          : '🎞️ VIDEO 2 OVERLAY TRACK · PIP CUTAWAY',
+        cardX + 20,
+        cardY + cardH * 0.34
+      );
+
+      ctx.fillStyle = '#FFFFFF';
+      ctx.font = '800 21px "Plus Jakarta Sans", sans-serif';
+      ctx.fillText(clip.label, cardX + 20, cardY + cardH * 0.64);
+
+      ctx.fillStyle = 'rgba(255,255,255,0.14)';
+      drawRoundedRect(ctx, cardX + 20, cardY + cardH * 0.83, cardW - 40, 5, 3);
+      ctx.fill();
+      ctx.fillStyle = isBroll ? '#F59E0B' : '#C084FC';
+      drawRoundedRect(
+        ctx,
+        cardX + 20,
+        cardY + cardH * 0.83,
+        (cardW - 40) * prog,
+        5,
+        3
+      );
+      ctx.fill();
+      ctx.restore();
+    }
   }
 
   // 2. Measured Contrast Scrim
-  if (style.showScrim) {
-    const scrimGrad = ctx.createLinearGradient(0, canvasHeight * 0.44, 0, canvasHeight);
+  if (style.showScrim && !transparentAlphaOnly) {
+    const scrimGrad = ctx.createLinearGradient(0, logicalH * 0.44, 0, logicalH);
     scrimGrad.addColorStop(0, 'rgba(0, 0, 0, 0)');
     scrimGrad.addColorStop(0.5, 'rgba(0, 0, 0, 0.38)');
     scrimGrad.addColorStop(1, 'rgba(0, 0, 0, 0.82)');
     ctx.fillStyle = scrimGrad;
-    ctx.fillRect(0, canvasHeight * 0.44, canvasWidth, canvasHeight * 0.56);
+    ctx.fillRect(0, logicalH * 0.44, logicalW, logicalH * 0.56);
   }
 
   // 2.5 CapCut / Premiere Pro / Photoshop Mask Studio Layer
-  if (style.maskMode && style.maskMode !== 'none') {
-    drawCapCutPremiereMask(ctx, canvasWidth, canvasHeight, style);
+  if (style.maskMode && style.maskMode !== 'none' && !transparentAlphaOnly) {
+    drawCapCutPremiereMask(ctx, logicalW, logicalH, style);
   }
 
   // 3. Find Active Segment
-  const activeSegment = segments.find(
-    (s) => currentTime >= s.startTime && currentTime <= s.endTime + 0.05
-  );
+  const activeSegment = isCaptionsVisible
+    ? segments.find((s) => currentTime >= s.startTime && currentTime <= s.endTime + 0.05)
+    : undefined;
 
   let activePrimaryText = '';
 
   if (activeSegment) {
+    // Draw Context-Aware AI B-Roll Cutaway when enabled
+    if (
+      style.brollEnabled &&
+      activeSegment.brollTheme &&
+      activeSegment.brollTheme !== 'none' &&
+      !transparentAlphaOnly
+    ) {
+      ctx.save();
+      const segProg = Math.max(
+        0,
+        Math.min(
+          1,
+          (currentTime - activeSegment.startTime) /
+            Math.max(0.4, activeSegment.endTime - activeSegment.startTime)
+        )
+      );
+      const isFullscreen = style.brollDisplayMode === 'fullscreen';
+      const cardW = isFullscreen ? logicalW * 0.92 : logicalW * 0.72;
+      const cardH = isFullscreen ? logicalH * 0.44 : logicalH * 0.17;
+      const cardX = (logicalW - cardW) / 2;
+      const cardY = isFullscreen ? logicalH * 0.42 : logicalH * 0.77;
+
+      ctx.fillStyle = 'rgba(14, 17, 23, 0.92)';
+      ctx.shadowColor = 'rgba(0, 0, 0, 0.75)';
+      ctx.shadowBlur = 24;
+      drawRoundedRect(ctx, cardX, cardY, cardW, cardH, 18);
+      ctx.fill();
+      ctx.shadowBlur = 0;
+
+      ctx.strokeStyle =
+        activeSegment.brollTheme === 'wealth'
+          ? 'rgba(250, 204, 21, 0.65)'
+          : activeSegment.brollTheme === 'community'
+          ? 'rgba(43, 174, 102, 0.65)'
+          : 'rgba(56, 189, 248, 0.65)';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      // Animated Ken Burns visual bars & icon inside B-Roll card
+      const accentHex =
+        activeSegment.brollTheme === 'wealth'
+          ? '#FACC15'
+          : activeSegment.brollTheme === 'community'
+          ? '#2BAE66'
+          : '#38BDF8';
+
+      ctx.fillStyle = hexToRgba(accentHex, 0.16);
+      drawRoundedRect(ctx, cardX + 14, cardY + 14, cardH - 28, cardH - 28, 12);
+      ctx.fill();
+
+      ctx.fillStyle = accentHex;
+      ctx.font = '800 28px "Plus Jakarta Sans", sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      const iconSym =
+        activeSegment.brollTheme === 'wealth'
+          ? '₹📈'
+          : activeSegment.brollTheme === 'community'
+          ? '👥✨'
+          : '⚡🧠';
+      ctx.fillText(iconSym, cardX + 14 + (cardH - 28) / 2, cardY + cardH / 2);
+
+      const textStartX = cardX + cardH + 2;
+      ctx.fillStyle = accentHex;
+      ctx.font = '700 13px "JetBrains Mono", monospace';
+      ctx.textAlign = 'left';
+      ctx.fillText(
+        `AI B-ROLL · ${activeSegment.brollTheme.toUpperCase()} + ${(
+          activeSegment.sfxType || 'WHOOSH'
+        ).toUpperCase()} SFX`,
+        textStartX,
+        cardY + cardH * 0.34
+      );
+
+      ctx.fillStyle = '#FFFFFF';
+      ctx.font = '700 20px "Plus Jakarta Sans", sans-serif';
+      ctx.fillText(
+        activeSegment.brollTitle || 'Context Visual Cutaway',
+        textStartX,
+        cardY + cardH * 0.62
+      );
+
+      // Progress bar inside B-roll card
+      ctx.fillStyle = 'rgba(255,255,255,0.12)';
+      drawRoundedRect(ctx, textStartX, cardY + cardH * 0.8, cardW - cardH - 24, 5, 3);
+      ctx.fill();
+      ctx.fillStyle = accentHex;
+      drawRoundedRect(
+        ctx,
+        textStartX,
+        cardY + cardH * 0.8,
+        (cardW - cardH - 24) * segProg,
+        5,
+        3
+      );
+      ctx.fill();
+      ctx.restore();
+    }
+
     const primaryTrackData =
       activeSegment.tracks[style.primaryTrack] ||
       activeSegment.tracks.english ||
       activeSegment.tracks.tinglish;
+
 
     const secondaryTrackData =
       style.displayMode === 'dual-stacked'
@@ -1211,34 +1708,90 @@ export function renderReelCanvasFrame(params: {
 
     if (primaryTrackData && primaryTrackData.words.length > 0) {
       activePrimaryText = primaryTrackData.text;
-      const isSidzMode =
-        style.hierarchyMode === 'sidz-vairagya' ||
-        style.hierarchyMode === 'sidz-20k-script' ||
-        style.hierarchyMode === 'sidz-valuing-wide' ||
-        style.hierarchyMode === 'sidz-truly-flame';
+      // Merge per-line overrides (Section 5.1 & 5.2)
+      const effectiveStyle: CaptionStyleConfig = {
+        ...style,
+        fontFamily:
+          activeSegment.lineStyleOverride?.fontFamily || style.fontFamily,
+        fontSize: activeSegment.lineStyleOverride?.fontSize || style.fontSize,
+        primaryColor:
+          activeSegment.lineStyleOverride?.primaryColor || style.primaryColor,
+        highlightColor:
+          activeSegment.lineStyleOverride?.secondaryColor || style.highlightColor,
+        positionX:
+          activeSegment.lineStyleOverride?.positionX ?? style.positionX,
+        positionY:
+          activeSegment.lineStyleOverride?.positionY ?? style.positionY,
+        backgroundOpacity: activeSegment.lineStyleOverride?.backgroundEnabled
+          ? Math.max(0.65, style.backgroundOpacity)
+          : style.backgroundOpacity,
+        arcEnabled:
+          Boolean(activeSegment.arcCurveDeg) || Boolean(style.arcEnabled),
+        arcCurveDeg:
+          activeSegment.arcCurveDeg !== undefined
+            ? activeSegment.arcCurveDeg
+            : style.arcCurveDeg,
+        horizontalSpacing: activeSegment.spreadWords
+          ? Math.max(28, (style.horizontalSpacing || 12) * 2.4)
+          : style.horizontalSpacing,
+      };
 
-      if (isSidzMode && style.animationType === 'premiere-pro') {
+      // When Depth Mask (Placed caption behind subject) is ON, automatically anchor the caption
+      // in the Behind-Head Zone so the speaker's head/hair overlaps the lower portion of the giant hook text!
+      let autoBehindHeadY = effectiveStyle.positionY;
+      if (effectiveStyle.captionDepthBehindSubject) {
+        if (hasUploadedVideo && videoElement && videoElement.readyState >= 2) {
+          const tracked = updateVideoSubjectDepthMatte(videoElement, 0.68);
+          // If positionY is still in the default lower/middle zone (> 42%), auto-lift to tracked behind-head height
+          if (autoBehindHeadY > 42) {
+            autoBehindHeadY = tracked.recommendedCaptionYPercent;
+          }
+        } else if (autoBehindHeadY > 44) {
+          // Sample reel speaker head is at ~45% Y, so 36% places giant text right behind the upper head/hair!
+          autoBehindHeadY = 36;
+        }
+      }
+
+      const depthAdjustedStyle: CaptionStyleConfig = effectiveStyle.captionDepthBehindSubject
+        ? {
+            ...effectiveStyle,
+            positionY: autoBehindHeadY,
+            bigWordScale: Math.max(1.85, (effectiveStyle.bigWordScale || 1.65) * 1.14),
+          }
+        : effectiveStyle;
+
+      const isSidzMode =
+        depthAdjustedStyle.hierarchyMode === 'sidz-vairagya' ||
+        depthAdjustedStyle.hierarchyMode === 'sidz-20k-script' ||
+        depthAdjustedStyle.hierarchyMode === 'sidz-valuing-wide' ||
+        depthAdjustedStyle.hierarchyMode === 'sidz-truly-flame';
+
+      if (
+        isSidzMode &&
+        depthAdjustedStyle.animationType === 'premiere-pro' &&
+        !depthAdjustedStyle.arcEnabled
+      ) {
         renderSidzCompositeCaption(
           ctx,
-          canvasWidth,
-          canvasHeight,
+          logicalW,
+          logicalH,
           currentTime,
           activeSegment.startTime,
           activeSegment.endTime,
           primaryTrackData.words,
-          style,
+          depthAdjustedStyle,
           isExportRender
         );
       } else {
         renderAnimatedPrimaryCaption(
           ctx,
-          canvasWidth,
-          canvasHeight,
+          logicalW,
+          logicalH,
           currentTime,
           activeSegment.startTime,
           activeSegment.endTime,
           primaryTrackData.words,
-          style,
+          depthAdjustedStyle,
           isExportRender
         );
       }
@@ -1252,11 +1805,33 @@ export function renderReelCanvasFrame(params: {
     ) {
       renderSecondaryStackedCaption(
         ctx,
-        canvasWidth,
-        canvasHeight,
+        logicalW,
+        logicalH,
         secondaryTrackData.text,
         style
       );
+    }
+  }
+
+  // 3.5 Layer 3: Real-Time Foreground Subject Cutout (Placed ON TOP of Behind-Head Captions when Depth Mask is ON!)
+  if (style.captionDepthBehindSubject && !transparentAlphaOnly && isVideo1Visible) {
+    if (hasUploadedVideo && videoElement && videoElement.readyState >= 2) {
+      ctx.save();
+      // Reset logical scale so foreground cutout draws at exact physical canvas resolution
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      renderForegroundSubjectCutoutLayer({
+        ctx,
+        canvasWidth,
+        canvasHeight,
+        videoElement,
+        hasUploadedVideo,
+        sensitivity: 0.68,
+        showMatteRimGuide: Boolean(style.showSafeZones && !isExportRender),
+      });
+      ctx.restore();
+    } else {
+      // Sample Reel Foreground Subject rendered on top of the behind-head caption!
+      drawSampleReelForegroundSubject(ctx, logicalW, logicalH, currentTime);
     }
   }
 
@@ -1264,18 +1839,20 @@ export function renderReelCanvasFrame(params: {
   if (style.showInstagramFrame) {
     drawInstagramReelsFrameOverlay(
       ctx,
-      canvasWidth,
-      canvasHeight,
+      logicalW,
+      logicalH,
       sampleReel,
       activePrimaryText,
       currentTime
     );
   }
 
-  // 5. Optional Safe Zone Overlay
-  if (style.showSafeZones) {
-    drawSafeZonesGuide(ctx, canvasWidth, canvasHeight);
+  // 5. Optional Safe Zone Overlay (NEVER rendered during video export)
+  if (style.showSafeZones && !isExportRender) {
+    drawSafeZonesGuide(ctx, logicalW, logicalH, style);
   }
+
+  ctx.restore();
 }
 
 interface MeasuredWordToken {
@@ -1330,7 +1907,9 @@ function renderAnimatedPrimaryCaption(
     });
   }
 
-  const maxLineWidth = canvasWidth * 0.88;
+  const maxLineWidth = canvasWidth * (canvasWidth > canvasHeight ? 0.82 : 0.88);
+  const aspectFontScale =
+    canvasHeight <= 760 ? (canvasWidth > canvasHeight ? 0.84 : 0.88) : 1.0;
 
   const tokens: MeasuredWordToken[] = pageWords.map((w, idx) => {
     const isSpoken = idx === localActiveIdx;
@@ -1345,7 +1924,7 @@ function renderAnimatedPrimaryCaption(
         : style.smallWordScale || 0.72
       : 1.0;
 
-    let computedFontSize = Math.round(style.fontSize * scaleFactor);
+    let computedFontSize = Math.round(style.fontSize * aspectFontScale * scaleFactor);
     const chosenFamily =
       useBigScale && style.heroWordFontFamily ? style.heroWordFontFamily : style.fontFamily;
     const display = transformWord(w.word, style.textTransform);
@@ -1599,6 +2178,16 @@ function renderAnimatedPrimaryCaption(
         wordCenterY += (1 - segFadeAlpha) * 14;
       }
 
+      // Apply Arc Curve if enabled (Section 5.1 & 7.7 Arc)
+      if (style.arcEnabled && style.arcCurveDeg) {
+        const normX =
+          (wordCenterX - baseCenterX) / Math.max(120, maxRenderedLineWidth * 0.55);
+        const clampedNorm = Math.max(-1.2, Math.min(1.2, normX));
+        const deg = style.arcCurveDeg;
+        wordCenterY += (clampedNorm * clampedNorm - 0.35) * deg * 1.4;
+        rotationRad += clampedNorm * ((deg * Math.PI) / 180) * 0.45;
+      }
+
       ctx.translate(wordCenterX, wordCenterY);
       if (rotationRad !== 0) ctx.rotate(rotationRad);
       ctx.scale(scale, scale);
@@ -1608,6 +2197,20 @@ function renderAnimatedPrimaryCaption(
       applyCanvasLetterSpacing(ctx, style.letterSpacing ?? 0);
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
+
+      // Section 7.7: 3D Depth Extrusion
+      if (style.depth3DEnabled) {
+        const depthPx = Math.max(2, Math.min(20, style.depth3DDepth ?? 8));
+        const angleRad = ((style.depth3DAngle ?? 135) * Math.PI) / 180;
+        const dx = Math.cos(angleRad);
+        const dy = Math.sin(angleRad);
+        ctx.save();
+        ctx.fillStyle = style.depth3DColor || '#FF5722';
+        for (let d = depthPx; d >= 1; d -= 1.5) {
+          ctx.fillText(token.display, dx * d, dy * d);
+        }
+        ctx.restore();
+      }
 
       if (style.animationType === 'box-slide' && isSpoken) {
         const pillPadX = 14;
@@ -1637,18 +2240,25 @@ function renderAnimatedPrimaryCaption(
       }
 
       if (
+        style.glowEnabled ||
         (style.animationType === 'neon-glow' && isSpoken) ||
         (style.animationType === 'premiere-pro' && (isSpoken || token.isBigHero))
       ) {
-        ctx.shadowColor = style.useGradient ? style.gradientMid : style.highlightColor;
-        ctx.shadowBlur = Math.max(18, style.shadowBlur * 1.35);
+        ctx.shadowColor =
+          style.glowColor ||
+          style.emphasisGlowColor ||
+          (style.useGradient ? style.gradientMid : style.highlightColor);
+        ctx.shadowBlur = Math.max(
+          18,
+          style.glowSpread || style.shadowBlur * 1.35
+        );
         ctx.shadowOffsetX = 0;
         ctx.shadowOffsetY = 3;
-      } else if (style.shadowBlur > 0) {
-        ctx.shadowColor = 'rgba(0, 0, 0, 0.88)';
+      } else if ((style.dropShadowEnabled ?? true) && style.shadowBlur > 0) {
+        ctx.shadowColor = style.dropShadowColor || 'rgba(0, 0, 0, 0.88)';
         ctx.shadowBlur = style.shadowBlur;
-        ctx.shadowOffsetX = 0;
-        ctx.shadowOffsetY = 4;
+        ctx.shadowOffsetX = style.dropShadowX ?? 0;
+        ctx.shadowOffsetY = style.dropShadowY ?? 4;
       }
 
       if (style.strokeWidth > 0 && style.animationType !== 'box-slide') {
@@ -1661,13 +2271,15 @@ function renderAnimatedPrimaryCaption(
         ctx.strokeText(renderedText, 0, 0);
       }
 
-      const activeGradientOrColor = createSidzVerticalGradient(
-        ctx,
-        token.fontSize,
-        currentTime,
-        style,
-        token.width
-      );
+      const activeGradientOrColor = token.raw.customColor
+        ? token.raw.customColor
+        : createSidzVerticalGradient(
+            ctx,
+            token.fontSize,
+            currentTime,
+            style,
+            token.width
+          );
 
       if (style.animationType === 'box-slide' && isSpoken) {
         ctx.fillStyle = '#090A0F';
@@ -1690,14 +2302,24 @@ function renderAnimatedPrimaryCaption(
         ctx.restore();
       } else {
         const shouldColorWithGradient =
+          Boolean(token.raw.customColor) ||
           isSpoken ||
-          token.isBigHero ||
+          (token.isBigHero && !style.removeEmphasis) ||
           (isPast && style.animationType === 'karaoke');
 
         ctx.fillStyle = shouldColorWithGradient
           ? activeGradientOrColor
           : style.primaryColor;
         ctx.fillText(renderedText, 0, 0);
+      }
+
+      if (style.underlineText || token.raw.isUnderlined) {
+        ctx.beginPath();
+        ctx.strokeStyle = ctx.fillStyle;
+        ctx.lineWidth = Math.max(2, token.fontSize * 0.07);
+        ctx.moveTo(-token.width / 2, token.fontSize * 0.46);
+        ctx.lineTo(token.width / 2, token.fontSize * 0.46);
+        ctx.stroke();
       }
 
       ctx.restore();
@@ -2105,30 +2727,48 @@ function drawInstagramReelsFrameOverlay(
 function drawSafeZonesGuide(
   ctx: CanvasRenderingContext2D,
   width: number,
-  height: number
+  height: number,
+  style?: CaptionStyleConfig
 ) {
   ctx.save();
-  ctx.strokeStyle = 'rgba(255, 90, 31, 0.45)';
-  ctx.setLineDash([6, 6]);
-  ctx.lineWidth = 1.5;
+  const opacity = Math.max(0.25, Math.min(1, style?.safeZoneOpacity ?? 0.85));
+  ctx.globalAlpha = opacity;
 
-  ctx.strokeRect(24, 72, width - 48, height - 260);
+  // 1. Subtle 3x3 Rule-of-Thirds Grid Lines (white translucent)
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.28)';
+  ctx.lineWidth = 1.2;
+  ctx.setLineDash([]);
 
-  ctx.fillStyle = 'rgba(255, 90, 31, 0.12)';
-  drawRoundedRect(ctx, width - 78, height * 0.48, 56, height * 0.34, 12);
-  ctx.fill();
+  // Vertical thirds
+  [width / 3, (width * 2) / 3].forEach((vx) => {
+    ctx.beginPath();
+    ctx.moveTo(vx, 0);
+    ctx.lineTo(vx, height);
+    ctx.stroke();
+  });
+
+  // Horizontal upper third
+  ctx.beginPath();
+  ctx.moveTo(0, height * 0.36);
+  ctx.lineTo(width, height * 0.36);
   ctx.stroke();
 
-  ctx.fillStyle = 'rgba(255, 90, 31, 0.12)';
-  drawRoundedRect(ctx, 24, height - 170, width - 115, 130, 12);
-  ctx.fill();
+  // 2. Kalakar Signature Cyan Vertical Center Alignment Line (#00E5FF)
+  ctx.strokeStyle = '#00E5FF';
+  ctx.lineWidth = 2.2;
+  ctx.beginPath();
+  ctx.moveTo(width / 2, 0);
+  ctx.lineTo(width / 2, height);
   ctx.stroke();
 
-  ctx.fillStyle = '#FF5A1F';
-  ctx.font = '600 13px "JetBrains Mono", monospace';
-  ctx.textAlign = 'left';
-  ctx.fillText('SAFE CAPTION ZONE', 34, 92);
-  ctx.fillText('REELS / SHORTS UI OVERLAY ZONE', 34, height - 150);
+  // 3. Kalakar Signature Yellow Horizontal Lower-Third Baseline (#FACC15)
+  ctx.strokeStyle = '#FACC15';
+  ctx.lineWidth = 2.2;
+  ctx.beginPath();
+  ctx.moveTo(0, height * 0.65);
+  ctx.lineTo(width, height * 0.65);
+  ctx.stroke();
 
   ctx.restore();
 }
+

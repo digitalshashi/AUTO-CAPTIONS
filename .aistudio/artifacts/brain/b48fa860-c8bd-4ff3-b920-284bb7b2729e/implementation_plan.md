@@ -1,140 +1,89 @@
-# VakyaReel Studio — Multi-Language & Tinglish Reel Captioning & Kinetic Typography Engine
+# Implementation Plan: Real-Time AI Subject Depth Masking, Collapsible 3-Track NLE Timeline & High-Density Audio/Whoosh Waveforms
 
-VakyaReel Studio is a high-speed vertical video and reel captioning studio that transforms any uploaded video into an engaging, kinetic-captioned reel across **Tinglish**, **English**, **all major Indian languages**, and their **Romanized colloquial scripts** (Hinglish, Tanglish, Kanglish, Manglish). Users can switch tracks instantaneously, stack dual-line captions, customize kinetic word-by-word animations and multi-script typography, and export either a burned-in animated video or standard subtitle/transcript files (`SRT`, `VTT`, `JSON`).
-
-## User Review & Critical Decisions
-
-> [!IMPORTANT]
-> The following product decisions incorporate your confirmed preferences from our planning questionnaire:
-
-- **Confirmed Decision 1 — Comprehensive Indian Language & Romanized Script Matrix**: Full support for **Tinglish (Telugu in Latin script)**, **English**, **Native Telugu (తెలుగు)**, plus **Hindi / Hinglish**, **Tamil / Tanglish**, **Kannada / Kanglish**, **Malayalam / Manglish**, **Marathi**, **Bengali**, **Gujarati**, **Punjabi**, and **Odia**.
-- **Confirmed Decision 2 — Switchable Tracks + Dual-Line Stacked Display**: Users can view a single active script track (e.g., pure Tinglish or pure Telugu) OR enable **Dual-Line Stacked Mode** (e.g., bold animated Tinglish on the primary line with synchronized English or Native Telugu underneath).
-- **Confirmed Decision 3 — Complete Export Suite**: Includes real-time HTML5 Canvas + MediaRecorder **Burned-In Animated Video Export (`.webm`/`.mp4`)** alongside instant **`.SRT`**, **`.VTT`**, and **`.JSON`** multi-track transcript downloads.
-- **Fast Audio-First Extraction Strategy**: To ensure caption generation is ultra-fast regardless of video file size, the browser extracts and compresses the audio stream client-side via Web Audio API before sending it to the server-side Gemini multimodal pipeline (`gemini-3.8-flash` / `gemini-3.5-transcribe`), returning synchronized word-level and phrase-level timestamps across core scripts in a single pass.
-
----
-
-## 1. Overview & Core Concept
-
-- **What It Does**: Creators upload any vertical reel or video (or test immediately with built-in Indian creator sample reels). The app extracts audio in milliseconds, generates accurately timed captions with word-level pacing in Tinglish, English, Native Script, and any selected Indian language, and renders real-time kinetic caption animations on a 9:16 vertical stage.
-- **Target Audience / Persona**: Short-form video creators, regional Indian content producers, social media editors, and educators who speak in natural code-mixed Indian languages (like Telugu-English / Tinglish) and need studio-grade animated captions without tedious manual transliteration.
-- **Key Value**: Eliminates slow video uploads and awkward machine translations by natively understanding conversational code-switching (Tinglish/Hinglish/Tanglish) while pairing Indian script fonts with punchy, creator-ready word-by-word animations.
+## 1. Context & Product Objectives
+We are upgrading the **Merupify / Kalakar Desi Video Editing Studio** across four core areas based on your workflow requirements and preferences:
+1. **Real-Time AI Person Cutout with Auto Behind-Head Placement (`Depth Mask ON`)**:
+   - When a reel or medical/educational creator video is uploaded (or when a sample reel is loaded), enabling **Placed caption behind subject (Depth Mask ON)** automatically places large background hooks, medical terms, and impact lines *behind* the speaker's head/shoulders while rendering the speaker's foreground cutout cleanly in front of the text.
+   - Automatic head/torso bounding-box & portrait alpha matte extraction runs in real time on the uploaded HTML5 `<video>` frame at 60fps, positioning the caption's Y-anchor in the upper-head background zone (`24%–34%` vertical height) so the speaker's head naturally overlaps the lower portion of the giant display typography without obstructing smaller subtitle context.
+2. **Streamlined 3-Track Default Timeline (`Captions`, `Video 1`, `Audio 1`) with 1-Click Add / Minimize**:
+   - By default, only **3 core tracks** are visible in the timeline: **Captions**, **Video 1**, and **Audio 1**.
+   - Optional tracks (**B-Roll 1**, **Video 2**, and **Music & Whoosh SFX**) are minimized/hidden by default so the workspace stays clean and uncluttered.
+   - Users can add or restore **B-Roll 1**, **Video 2**, or **Music / Whoosh SFX** with a single click from the Timeline Header bar (`+ B-Roll`, `+ Video 2`, `+ Music & Whoosh`), and any track can be minimized (`–` Collapse/Hide button on the track header) to remove it from the active stack whenever it is not needed.
+3. **High-Density Premiere Pro Waveforms for `Audio 1` & `Music / Whoosh SFX`**:
+   - Replace coarse block bars with **fine, high-density sub-pixel Premiere Pro waveform peaks** (`1px–1.5px` vertical bi-directional / rectified transient needles with RMS core fill and dB guide lines).
+   - For **Audio 1**, decode real PCM audio sample peaks from the uploaded video's `AudioBuffer` (with high-resolution syllabic transient peaks).
+   - For **Music & Whoosh SFX**, render dual-layer visual envelopes: continuous high-density stereo music bed wavelengths plus distinct **Whoosh / Transition SFX transient spikes** (highlighted with cyan/amber transient envelopes at caption hook entrances and B-roll cuts).
+4. **Gemini Transcription Fallback & Error Fix (`server.ts`)**:
+   - Fix `Model gemini-3.5-transcribe error: 400 Developer instruction is not enabled for this model` by inlining system instructions directly into the user prompt contents rather than passing `config.systemInstruction` to models that reject developer instructions.
+   - Fix `Model gemini-3.8-flash error: 503 High demand` by adding automatic exponential backoff + jitter and seamless silent failover across `gemini-3.5-transcribe`, `gemini-3.8-flash`, and `gemini-3.1-flash-lite` without emitting `[Gemini Fast Fallback] ... error` console warnings that trigger the runtime error overlay.
 
 ---
 
-## 2. User Experience & Visual Design
+## 2. Research & Technical Architecture
 
-### Key User Flows
-1. **Upload or Instant Sample Reel Selection**: Drag-and-drop any video file (MP4, WebM, MOV) onto the studio dropzone, record directly from the camera, or load a pre-bundled sample reel to test styles immediately.
-2. **Fast Multi-Script Caption Generation**: Select the spoken source language (Auto-Detect, Telugu/Tinglish, Hindi/Hinglish, Tamil/Tanglish, etc.) and click **Generate Fast Captions**. Client-side audio extraction feeds the server-side Gemini endpoint to produce synchronized tracks for **Romanized (Tinglish/Hinglish)**, **English**, and **Native Script** simultaneously, with one-click expansion to 10+ other Indian languages.
-3. **Track Switching & Dual-Line Stacking**: Toggle between single-track mode and **Dual-Line Stacked Mode** (e.g., Primary: *Tinglish* + Secondary: *English* or *Native Telugu*), and edit any word, transliteration, or timestamp inline on the synchronized transcript timeline.
-4. **Typography, Style Presets & Kinetic Animations**: Pick from curated creator presets (*Hormozi Punch*, *Tinglish Neon Pop*, *Cinema Editorial*, *Minimal Glass Box*, *Karaoke Word Fill*, *Tollywood Kinetic*) and fine-tune font family, word highlight colors, stroke thickness, background box opacity, vertical safe-zone positioning, and animation physics.
-5. **Export & Download**: Export the final reel as a **Burned-In Animated Video** rendered frame-accurately via HTML5 Canvas + WebAudio stream capture, or download `.SRT`, `.VTT`, or `.JSON` files for any language track.
+### A. Real-Time AI Person Cutout & Auto Behind-Head Caption Placement
+- **How Real-Time Video Matting Works in the Browser Canvas (`60fps`)**:
+  - **Layer 1 (Background Plate)**: Draw the full video frame (or active B-Roll / Video 2 clip) onto the main canvas.
+  - **Layer 2 (Behind-Subject Caption Layer)**: When `captionDepthBehindSubject` is `true` (or when a medical/hook template with Depth Mask is selected), compute the **Auto Behind-Head Anchor Zone**:
+    - Analyze the upper-center subject silhouette from an offscreen downsampled segmentation pass (`160×284` offscreen analysis buffer) that detects skin-tone/face/hair cluster centroids and bilateral edge gradients against the background plate, or uses MediaPipe/Canvas portrait matte extraction.
+    - Automatically lift the giant impact/medical keyword block to the **Behind-Head Horizon (`Y = headTopY + 18%` to `34%` of frame height)** with boosted scale (`1.18x–1.35x`) and subtle depth shadow so the letters sit clearly behind the cranium and shoulders.
+  - **Layer 3 (Foreground Subject Cutout Composite)**:
+    - Generate a real-time soft-feathered alpha matte (`OffscreenCanvas` / cached frame matte synced to `videoElement.currentTime`) isolating the speaker's head, hair, and torso.
+    - Composite the speaker's foreground matte *on top of* the Layer 2 caption text using `source-over` with a `2.5px` edge feather and subtle rim-occlusion shadow (`rgba(0,0,0,0.38)`) where the subject's head overlaps the letters.
+  - **Auto-Upload Depth & Medical/Hook Detection**:
+    - When a user uploads a video with Depth Mask enabled (or clicks **Auto Behind-Subject Depth** in the inspector/toolbar), the algorithm automatically scans the video's subject position, turns on `captionDepthBehindSubject`, and sets `verticalPositionPx` to the optimal behind-head height.
+    - Includes an interactive **Depth Mask Preview Badge & Subject Matte Inspector** (toggle between *Composite View*, *Subject Alpha Matte Preview*, and *Auto Head-Tracking Lock*, plus a Feather/Matte Threshold fine-tune slider for studio lighting variations).
 
-### Visual Identity & Theme
-- **Aesthetic Direction**: **Precision Dark Broadcast Studio** — a tactile, distraction-free dark workspace (`1440px` desktop studio layout) that puts the 9:16 video viewport and high-contrast kinetic typography front and center.
-- **Color Palette & Mood (60-30-10 Discipline)**:
-  - **60% Dominant Neutral Canvas**: Deep studio obsidian (`#090A0F` / `slate-950`) so vibrant video frames and caption highlights pop without glare.
-  - **30% Structural Surfaces**: Crisp elevated slate panels (`#12151E` / `slate-900`) with `1px solid rgba(255,255,255,0.08)` hairline dividers—single-elevation depth with zero nested card clutter.
-  - **10% Accent Budget**: Electric Saffron (`#FF5A1F`) for primary generation/export actions and Cyber Lime (`#CCFF00`) / Cyan (`#00F0FF`) for active timeline playheads and kinetic word highlights.
-- **Typography & Hierarchy (2+1 Font Rule + Native Indian Script Support)**:
-  - *Studio UI Display*: `Bricolage Grotesque` (600/700 weight) for workspace headers and preset titles.
-  - *Studio UI Body*: `Plus Jakarta Sans` (400/500 weight) for clean scannability across controls and transcript rows.
-  - *Timestamps & Timecodes*: `JetBrains Mono` with `font-variant-numeric: tabular-nums` for frame-accurate `00:00.00` alignment.
-  - *Reel Caption Canvas Fonts*: Google Fonts loaded dynamically for both Latin/Tinglish display (`Outfit`, `Anton`, `Bricolage Grotesque`, `Playfair Display`, `Caveat`) and authentic Indian scripts (`Noto Sans Telugu`, `Noto Sans Devanagari`, `Noto Sans Tamil`, `Noto Sans Kannada`, `Noto Sans Malayalam`, `Noto Sans Bengali`, `Noto Sans Gurmukhi`, `Noto Sans Gujarati`).
-- **Component Styling & Layout**:
-  - **Top Bar Contract**: Single-row 3-zone header separated by `gap-8`: Left brand wordmark (`VakyaReel Studio`), Center 4 single-line workspace view links (`Workspace`, `Languages`, `Style & Motion`, `Export`), and Right primary CTA button (`Export Reel`).
-  - **3-Column Studio Layout**:
-    - *Left Panel (360px)*: Multi-Script Transcript & Timeline Editor with live search, inline text editing for Tinglish/English/Native tracks, and one-click Indian language translation generator.
-    - *Center Stage (Flexible)*: 9:16 Interactive Video & HTML5 Kinetic Caption Canvas with safe-zone guides (Instagram Reels / YouTube Shorts overlay toggle), playback transport controls, and interactive timeline scrubber.
-    - *Right Inspector (380px)*: Tabbed inspector for **Presets**, **Typography & Colors**, **Animation Physics**, and **Dual-Line Layout**.
+### B. 3-Track Default Timeline & 1-Click Track Minimizer (`PremiereMultiTrackTimeline.tsx`)
+- **Default Track Configuration**:
+  - `captions` (**Captions — Word & Line Split**): `visibleInTimeline: true` (Default ON)
+  - `video1` (**Video 1 — Main Reel**): `visibleInTimeline: true` (Default ON)
+  - `audio1` (**Audio 1 — Dialogue Waveform**): `visibleInTimeline: true` (Default ON)
+  - `broll` (**B-Roll 1 — Cutaways**): `visibleInTimeline: false` (Minimized by default; opens automatically when `+ B-Roll` or `+ AI B-Roll` is clicked)
+  - `video2` (**Video 2 — PIP / Overlay**): `visibleInTimeline: false` (Minimized by default; opens automatically when `+ Video 2` is clicked)
+  - `music` (**Music & Whoosh SFX**): `visibleInTimeline: false` (Minimized by default; opens automatically when `+ Music & Whoosh` is clicked)
+- **Minimize / Restore UX**:
+  - Every track row header in the left column has a **`Minimize Track (–)`** button that collapses and hides that track from the timeline stack with one click.
+  - The timeline toolbar displays compact **Minimized Track Chips (`+ B-Roll 1`, `+ Video 2`, `+ Music & Whoosh`)** whenever those tracks are minimized, allowing instant 1-click restoration or clip insertion.
 
-### Interactive Feedback & Motion
-- **8 Real-Time Caption Animation Engines**:
-  1. *Karaoke Word Fill*: Active spoken word fills progressively with highlight color and scales `1.12x`.
-  2. *Pop-In Spring*: Each word springs upward with elastic overshoot as it is spoken.
-  3. *Box Highlight Slide*: A rounded colored highlight pill glides smoothly from word to word.
-  4. *Typewriter Burst*: Rapid character-by-character reveal with rhythmic cursor pulse.
-  5. *Neon Glow Pulse*: Active word ignites with a customizable neon outer aura.
-  6. *Wave Bounce*: Words ripple vertically in a sine wave locked to speech cadence.
-  7. *Word-by-Word Stomp*: High-impact single or 2-word center-frame slam for fast-paced reels.
-  8. *Fade & Blur Cinema*: Smooth optical blur-to-sharp entrance for documentary/cinematic reels.
+### C. High-Density Premiere Pro Waveforms (`Audio 1` & `Music / Whoosh SFX`)
+- **Real Web Audio API High-Density Peak Extraction (`src/utils/audioWaveformAnalyzer.ts`)**:
+  - When a user uploads a video or audio file, decode the audio stream via `AudioContext.decodeAudioData` and compute a **high-density multi-resolution peak array** (`1,200` to `2,400` min/max/RMS buckets across the duration).
+  - Render using a dedicated high-DPI `<canvas>` inside each `Audio 1` and `Music / Whoosh SFX` clip rather than coarse DOM `<div>` bars:
+    - **Audio 1 (Dialogue Track)**: Crisp teal-emerald (`#10B981` outer peak needles + `#34D399` inner RMS core) mirrored waveform with `-6dB` / `-12dB` reference hairlines and exact speech pauses matching the word-by-word captions.
+    - **Music & Whoosh SFX Track**: Dual-layer high-density waveform canvas showing:
+      1. **Stereo Music Bed**: Dense violet-indigo (`#818CF8` / `#C084FC`) rhythmic waveform needles.
+      2. **Whoosh / Riser / Impact SFX Transients**: Distinct golden-amber (`#FBBF24` / `#38BDF8`) high-energy diamond transient spikes aligned with hook transitions and B-Roll cuts, with clickable `+ Add Whoosh at Playhead` support.
 
 ---
 
-## 3. Key Product Decisions & Trade-Offs
-
-- **Decision 1: Client-Side Audio Extraction + Single-Pass Multi-Track Generation**
-  - *Chosen Approach*: Extract a lightweight mono 16kHz WAV/MP3 audio buffer in the browser before calling `/api/captions/generate`, requesting structured JSON with synchronized segments containing `tinglish` (or active Romanized script), `english`, and `nativeScript` simultaneously, plus estimated word timings.
-  - *Why*: Uploading a 50MB raw 4K video over HTTP is slow; extracting the audio track in the browser takes under 400ms and shrinks the payload by 95%, making Gemini transcription and Tinglish/English/Native caption generation blazingly fast.
-  - *Alternatives Considered*: Uploading full raw video files to the server (rejected due to upload latency and payload bottlenecks).
-
-- **Decision 2: Dual HTML5 Canvas + DOM Overlay Rendering Engine**
-  - *Chosen Approach*: Render the video and kinetic animated captions onto a high-DPI HTML5 `<canvas>` synchronized with `requestAnimationFrame`.
-  - *Why*: Guarantees 100% visual parity between live preview and the **Burned-In Video Export** (via `canvas.captureStream(60)` combined with the video's `AudioContext` media stream), so exported videos include every font, stroke, emoji, dual-line stack, and word animation.
-  - *Alternatives Considered*: Pure CSS DOM overlays (rejected because CSS overlays cannot be directly recorded into a downloadable video file in the browser).
+## 3. Aesthetic & Workspace Design Alignment
+Following the SaaS & Broadcast Studio constitution:
+- **Typography**: `Outfit` / `Plus Jakarta Sans` for studio headers and controls, `DM Sans` for compact inspector labels, and strict `JetBrains Mono` (`tabular-nums`) for all SMPTE timecodes (`00:00.00`), dB meters, and frame counters.
+- **Color Palette (60-30-10 Dark Broadcast NLE)**:
+  - **60% Canvas & Timeline Wells**: Deep broadcast obsidian (`#07090F`, `#0B0E17`).
+  - **30% Track Headers & Inspector Surfaces**: Slate structural panels (`#111622`) with `1px solid rgba(255,255,255,0.08)` borders.
+  - **10% Semantic Track Accents**:
+    - Captions: Olive-Gold (`#B5943B` / `#FACC15`)
+    - Video 1: Premiere Blue (`#2563EB` / `#60A5FA`)
+    - Audio 1: Broadcast Emerald (`#059669` / `#34D399`)
+    - Music & Whoosh SFX: Electric Indigo & Amber Whoosh Peaks (`#7C3AED` / `#FBBF24`)
 
 ---
 
-## 4. Technical Architecture & Data Strategy *(Technical Reference)*
-
-### Architecture & Component Diagram
-
-```
-┌──────────────────────────────────────────────────────────────────────────────────┐
-│                        Top Navigation Bar (3-Zone Contract)                      │
-│  [VakyaReel Studio]        [Workspace · Languages · Style & Motion · Export]     │
-└────────────────────────────────────────┬─────────────────────────────────────────┘
-                                         │
-        ┌────────────────────────────────┼────────────────────────────────┐
-        ▼                                ▼                                ▼
-┌───────────────────────────┐  ┌──────────────────────────┐  ┌───────────────────────────┐
-│   Left: Multi-Language    │  │  Center: 9:16 Reel Stage │  │  Right: Style, Font &     │
-│    Transcript & Tracks    │  │  & Kinetic Canvas Engine │  │    Animation Inspector    │
-├───────────────────────────┤  ├──────────────────────────┤  ├───────────────────────────┤
-│ • Video Upload / Samples  │  │ • Synchronized <video> + │  │ • 8 Creator Style Presets │
-│ • Fast Audio Extractor    │  │   60fps HTML5 <canvas>   │  │ • Animation Mode Selector │
-│ • Active Track Switcher   │  │ • Safe-Zone Guide Overlay│  │   (Karaoke, Pop, Box, etc)│
-│   (Tinglish / EN / Native)│  │   (Reels / Shorts UI)    │  │ • Font Family & Script    │
-│ • Dual-Line Stack Toggle  │  │ • Transport & Frame      │  │   Pairing Controls        │
-│ • 11+ Indian Languages    │  │   Scrubber Bar           │  │ • Stroke, Shadow, Box &   │
-│   Instant Translator      │  │ • Live Word Highlighting │  │   Position Y/X Sliders    │
-│ • Inline Segment & Word   │  │   & Dual-Line Renderer   │  │ • Burned-In Video +       │
-│   Timestamp Editor        │  │                          │  │   SRT / VTT / JSON Export │
-└─────────────┬─────────────┘  └─────────────┬────────────┘  └─────────────┬─────────────┘
-              │                              │                             │
-              └──────────────────────────────┼─────────────────────────────┘
-                                             ▼
-┌──────────────────────────────────────────────────────────────────────────────────┐
-│                     Express Server API Proxy (/api/captions/*)                   │
-├──────────────────────────────────────────────────────────────────────────────────┤
-│ • POST /api/captions/transcribe — Accepts extracted audio/video base64, invokes  │
-│   @google/genai (gemini-3.8-flash) with structured JSON schema to output timed   │
-│   segments + word-level timestamps in Romanized (Tinglish/Hinglish), English,    │
-│   and Native Script simultaneously.                                              │
-│ • POST /api/captions/translate — Translates/transliterates existing timed        │
-│   segments into any requested Indian language (Tamil, Kannada, Malayalam, Hindi, │
-│   Marathi, Bengali, Gujarati, Punjabi, Odia) in both Native & Romanized script.  │
-└──────────────────────────────────────────────────────────────────────────────────┘
-```
-
-### Data Model & State
-- **`CaptionSegment`**:
-  - `id`: Unique segment identifier
-  - `startTime` / `endTime`: Float seconds (`tabular-nums` formatted)
-  - `tracks`: Record mapping language/script keys (`tinglish`, `english`, `telugu`, `hindi`, `hinglish`, `tamil`, `tanglish`, `kannada`, `kanglish`, `malayalam`, `manglish`, `marathi`, `bengali`, `gujarati`, `punjabi`, `odia`) to `{ text: string, words: WordTiming[] }`
-- **`CaptionStyleConfig`**:
-  - `presetId`: Active preset identifier
-  - `animationType`: `'karaoke' | 'pop' | 'box-slide' | 'typewriter' | 'neon-glow' | 'wave' | 'stomp' | 'cinema-fade'`
-  - `displayMode`: `'single' | 'dual-stacked'`
-  - `primaryTrack`: Track key (default `'tinglish'`)
-  - `secondaryTrack`: Track key (default `'english'` or `'telugu'`)
-  - `fontFamily`, `fontSize`, `fontWeight`, `textTransform`, `primaryColor`, `highlightColor`, `strokeColor`, `strokeWidth`, `backgroundColor`, `backgroundOpacity`, `positionY`, `wordsPerLine`, `animationSpeed`
-
-### Interactive Component & State Mapping
-- **Video Upload & Sample Loader**: Handles file validation, object URL creation, metadata inspection (duration/aspect ratio), and automatic client-side audio extraction using `OfflineAudioContext` to produce a compact WAV base64 payload. Also includes a built-in synthesized demo reel with sample Telugu/Tinglish voiceover audio so users can test every animation and language immediately.
-- **Multi-Track Transcript Editor**: Clicking any segment seeks the video player to `segment.startTime`. Editing text in any language track immediately updates the word array and re-renders the live 60fps canvas preview.
-- **On-Demand Indian Language Expansion**: Selecting any additional Indian language triggers `/api/captions/translate`, populating both the native script (e.g., Tamil `தமிழ்`) and Romanized script (`Tanglish`) while preserving exact segment and word timing.
-- **Export Engine**:
-  - *SRT / VTT / JSON*: Formats the active track (or dual-stacked tracks) into spec-compliant subtitle files and triggers instant browser download.
-  - *Burned-In Video Export*: Plays the video from `0:00` to completion while capturing the composite `<canvas>` video track and `AudioContext` destination track via `MediaRecorder`, displaying a real-time progress bar and downloading the finished captioned video file.
+## 4. Planned File Changes
+1. **`server.ts`**:
+   - Update `generateWithModelChain` and transcription model calls so `gemini-3.5-transcribe` receives instructions embedded inside `contents` instead of `config.systemInstruction`.
+   - Add retry backoff for `503` spikes and sanitize fallback logging so transient model switchovers never trigger error overlays.
+2. **`src/utils/depthSubjectSegmentation.ts` (New)**:
+   - Implement real-time 60fps subject foreground matte extraction & head-zone bounding-box estimator for uploaded `<video>` elements and sample reels.
+   - Export `computeSubjectDepthMatte()` and `detectOptimalBehindHeadY()` so captions automatically position behind the speaker's head when Depth Mask is active.
+3. **`src/utils/audioWaveformAnalyzer.ts` (New)**:
+   - Implement Web Audio API high-density peak & RMS envelope extraction (`extractHighDensityWaveformFromVideo`) plus procedural high-resolution Music & Whoosh SFX transient envelope generators.
+4. **`src/utils/canvasCaptionRenderer.ts`**:
+   - Upgrade `renderReelCanvasFrame` Layer 2 & Layer 3 depth compositing to use the real-time subject matte from `depthSubjectSegmentation.ts`, auto behind-head Y placement, and optional matte debug overlay.
+5. **`src/components/PremiereMultiTrackTimeline.tsx`**:
+   - Set default visible tracks to **only `Captions`, `Video 1`, and `Audio 1`**, with **1-click Minimize (`–`)** on every track and **1-click Add/Restore buttons** for `B-Roll 1`, `Video 2`, and `Music & Whoosh SFX`.
+   - Replace coarse CSS bar waveforms with a high-DPI `<canvas>` Premiere Pro waveform renderer for `Audio 1` and `Music & Whoosh SFX` (including distinct Whoosh SFX transient spikes and `+ Whoosh SFX` insertion).
+6. **`src/App.tsx`**:
+   - Connect uploaded video audio decoding to the high-density waveform analyzer, wire auto behind-head depth placement on upload/toggle, and add Depth Mask sensitivity & Whoosh SFX controls.

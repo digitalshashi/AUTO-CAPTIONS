@@ -575,18 +575,20 @@ export interface AudioChunkPayload {
   chunkIndex: number;
   totalChunks: number;
   speechWindows?: SpeechWindow[];
+  waveformBars?: number[];
 }
 
 /**
- * Analyzes 8kHz mono PCM audio to detect exact timestamps where human speech/dialogue occurs,
- * skipping silent pauses and splitting long utterances at natural breath/energy dips.
+ * Analyzes 16kHz mono PCM audio to detect all intervals where human speech/dialogue occurs.
+ * Uses an adaptive percentile noise-floor detector with generous pre-roll (120ms) and hangover (420ms)
+ * so every single word—including soft intros, fast syllables, and trailing words—is captured.
  */
 export function detectSpeechWindowsFromPCM(
   samples: Float32Array,
   sampleRate: number,
   clipDuration: number
 ): SpeechWindow[] {
-  const frameDuration = 0.04; // 40ms frames
+  const frameDuration = 0.025; // 25ms high-resolution frames
   const frameSize = Math.max(1, Math.floor(sampleRate * frameDuration));
   const numFrames = Math.floor(samples.length / frameSize);
   if (numFrames < 4) {
@@ -608,31 +610,33 @@ export function detectSpeechWindowsFromPCM(
   }
 
   const sortedRms = [...rmsValues].sort((a, b) => a - b);
-  const noiseFloor = sortedRms[Math.floor(numFrames * 0.2)] || 0.005;
-  const threshold = Math.max(0.015, noiseFloor + (maxRms - noiseFloor) * 0.16);
+  const noiseFloor = sortedRms[Math.floor(numFrames * 0.12)] || 0.003;
+  const medianRms = sortedRms[Math.floor(numFrames * 0.5)] || 0.02;
+  // Sensitive threshold that never gets blinded by a single loud spike
+  const referencePeak = Math.min(maxRms, Math.max(medianRms * 2.5, 0.08));
+  const threshold = Math.max(0.008, noiseFloor + (referencePeak - noiseFloor) * 0.09);
 
-  // Extract raw active intervals
   const rawWindows: SpeechWindow[] = [];
   let inSpeech = false;
   let winStart = 0;
+  const hangoverFrames = 17; // 425ms hangover so natural inter-word micro-pauses stay connected
 
   for (let f = 0; f < numFrames; f++) {
     const t = f * frameDuration;
     if (rmsValues[f] >= threshold) {
       if (!inSpeech) {
         inSpeech = true;
-        winStart = Math.max(0, t - 0.06); // 60ms pre-roll so word attack is never clipped
+        winStart = Math.max(0, t - 0.12); // 120ms pre-roll so initial consonants are never clipped
       }
     } else if (inSpeech) {
-      // Check if silence continues for > 280ms (7 frames)
       let silenceFrames = 0;
-      for (let k = f; k < Math.min(numFrames, f + 7); k++) {
+      for (let k = f; k < Math.min(numFrames, f + hangoverFrames); k++) {
         if (rmsValues[k] < threshold) silenceFrames++;
       }
-      if (silenceFrames >= 6) {
+      if (silenceFrames >= hangoverFrames - 1) {
         inSpeech = false;
-        const winEnd = Math.min(clipDuration, t + 0.08);
-        if (winEnd - winStart >= 0.35) {
+        const winEnd = Math.min(clipDuration, t + 0.14);
+        if (winEnd - winStart >= 0.2) {
           rawWindows.push({
             start: Number(winStart.toFixed(2)),
             end: Number(winEnd.toFixed(2)),
@@ -648,45 +652,26 @@ export function detectSpeechWindowsFromPCM(
     });
   }
 
-  // Split any speech window longer than 3.4s at its lowest energy valley so captions stay 3-6 words
-  const refined: SpeechWindow[] = [];
+  // Merge adjacent windows separated by < 0.38s so continuous speech is smooth
+  const mergedWindows: SpeechWindow[] = [];
   for (const w of rawWindows) {
-    let curStart = w.start;
-    while (w.end - curStart > 3.4) {
-      const searchStartFrame = Math.floor(((curStart + 1.8) / clipDuration) * numFrames);
-      const searchEndFrame = Math.min(
-        numFrames - 1,
-        Math.floor(((curStart + 3.1) / clipDuration) * numFrames)
-      );
-      let minFrame = searchStartFrame;
-      let minVal = Infinity;
-      for (let f = Math.max(0, searchStartFrame); f <= searchEndFrame; f++) {
-        if (rmsValues[f] < minVal) {
-          minVal = rmsValues[f];
-          minFrame = f;
-        }
+    if (mergedWindows.length === 0) {
+      mergedWindows.push({ ...w });
+    } else {
+      const prev = mergedWindows[mergedWindows.length - 1];
+      if (w.start - prev.end < 0.38) {
+        prev.end = w.end;
+      } else {
+        mergedWindows.push({ ...w });
       }
-      const splitTime = Number(
-        Math.min(w.end - 0.8, Math.max(curStart + 1.5, minFrame * frameDuration)).toFixed(2)
-      );
-      refined.push({ start: Number(curStart.toFixed(2)), end: splitTime });
-      curStart = splitTime;
-    }
-    if (w.end - curStart >= 0.35) {
-      refined.push({ start: Number(curStart.toFixed(2)), end: Number(w.end.toFixed(2)) });
     }
   }
 
-  if (refined.length === 0) {
-    const count = Math.max(2, Math.min(6, Math.round(clipDuration / 2.6)));
-    const step = clipDuration / count;
-    return Array.from({ length: count }, (_, idx) => ({
-      start: Number((idx * step).toFixed(2)),
-      end: Number(((idx + 1) * step).toFixed(2)),
-    }));
+  if (mergedWindows.length === 0) {
+    return [{ start: 0, end: Number(clipDuration.toFixed(2)) }];
   }
 
-  return refined;
+  return mergedWindows;
 }
 
 /**
@@ -812,6 +797,8 @@ export function synthesizeClientFallbackSegments(
       telugu: 'మావ ఈ *రహస్యం* చూస్తే షాక్ అవుతారు!',
       hinglish: 'Bhai yeh *SECRET* dekh ke shock ho jaoge!',
       hindi: 'भाई यह *राज़* देखकर चौंक जाओगे!',
+      roman_urdu: 'Yaar yeh *RAAZ* dekh ke hairan reh jaoge!',
+      urdu: 'یار یہ *راز* دیکھ کر حیران رہ جاؤ گے!',
       tanglish: 'Machi indha *SECRET* paarunga!',
       tamil: 'நண்பா ఈ *ரகசியம்* பாருங்க!',
     },
@@ -821,6 +808,8 @@ export function synthesizeClientFallbackSegments(
       telugu: 'ఇది మీ *ఆలోచన*ని పూర్తిగా మార్చేస్తుంది!',
       hinglish: 'Yeh aapka *MINDSET* badal dega!',
       hindi: 'यह आपकी *सोच* पूरी तरह बदल देगा!',
+      roman_urdu: 'Yeh aapki *SOCH* mukammal badal dega!',
+      urdu: 'یہ آپ کی *سوچ* مکمل بدل دے گا!',
       tanglish: 'Idhu unga *MINDSET* ah maathidum!',
       tamil: 'இது உங்கள் *எண்ணத்தை* மாற்றிவிடும்!',
     },
@@ -830,6 +819,8 @@ export function synthesizeClientFallbackSegments(
       telugu: 'చాలా మంది *విలువ* ఇవ్వడం మర్చిపోతున్నారు!',
       hinglish: 'Bahut log *VALUE* karna bhool rahe hain!',
       hindi: 'बहुत लोग *महत्व* देना भूल रहे हैं!',
+      roman_urdu: 'Bohat log waqt ki *QADAR* bhool rahe hain!',
+      urdu: 'بہت لوگ وقت کی *قدر* بھول رہے ہیں!',
       tanglish: 'Neraya per *VALUE* panna maranthudranga!',
       tamil: 'பலர் *மதிப்பு* கொடுக்க மறக்கிறார்கள்!',
     },
@@ -839,6 +830,8 @@ export function synthesizeClientFallbackSegments(
       telugu: 'నిజంగా *100%* పనిచేసే పద్ధతి ఇదే!',
       hinglish: 'Yeh *100%* kaam karne wala tarika hai!',
       hindi: 'यह *100%* काम करने वाला तरीका है!',
+      roman_urdu: 'Yeh *100%* kaamयाब tarika hai!',
+      urdu: 'یہ *100%* کامیاب طریقہ ہے!',
       tanglish: 'Idhu *100%* work aaguravazhi!',
       tamil: 'இது *100%* வேலை செய்யும் முறை!',
     },
@@ -848,6 +841,8 @@ export function synthesizeClientFallbackSegments(
       telugu: 'ఒక్కసారి *ప్రయత్నించి* చూడండి మావ!',
       hinglish: 'Ek baar *TRY* karke dekho bhai!',
       hindi: 'एक बार *आजमाकर* देखो भाई!',
+      roman_urdu: 'Ek baar *AAZMA* ke dekho yaar!',
+      urdu: 'ایک بار *آزما* کر دیکھو یار!',
       tanglish: 'Oru thadava *TRY* panni paarunga!',
       tamil: 'ஒரு முறை *முயற்சி* செய்து பாருங்கள்!',
     },
@@ -859,6 +854,8 @@ export function synthesizeClientFallbackSegments(
     'telugu',
     'hinglish',
     'hindi',
+    'roman_urdu',
+    'urdu',
     'tanglish',
     'tamil',
   ] as const;
@@ -896,12 +893,160 @@ export function synthesizeClientFallbackSegments(
  * Uses a fast 15s starter chunk (0-15s) followed by 24s chunks so payloads are <380KB each
  * and total API calls per video are minimized.
  */
+/**
+ * Re-flows / regroups caption segments so each line has at most `targetWordsPerLine` words
+ * (e.g., 1 Word, 2 Words, 3 Words, 4 Words, 5 Words, or 0/4 for Default) and respects `maxCharsPerLine`.
+ */
+/**
+ * Re-flows / regroups caption segments so each line has at most `targetWordsPerLine` words
+ * (e.g., 1 Word, 2 Words, 3 Words, 4 Words, 5 Words, or 0/4 for Default) and respects `maxCharsPerLine`.
+ * Preserves smooth, non-overlapping word and segment timings across the entire timeline.
+ */
+export function regroupSegmentsByWordsPerLine(
+  segments: CaptionSegment[],
+  targetWordsPerLine: number,
+  maxCharsPerLine = 26
+): CaptionSegment[] {
+  if (segments.length === 0) return segments;
+  const effectiveWordsPerLine =
+    targetWordsPerLine <= 0 ? 3 : Math.max(1, Math.min(8, targetWordsPerLine));
+  const safeMaxChars = Math.max(10, maxCharsPerLine || 26);
+
+  const regrouped: CaptionSegment[] = [];
+  let runningLineNum = 1;
+
+  for (const seg of segments) {
+    const primaryTrackKey =
+      (Object.keys(seg.tracks) as TrackKey[]).find(
+        (k) => (seg.tracks[k]?.words?.length || 0) > 0
+      ) || 'tinglish';
+    const baseTrack = seg.tracks[primaryTrackKey];
+    if (!baseTrack || baseTrack.words.length === 0) {
+      regrouped.push({ ...seg, displayLineNumber: runningLineNum++ });
+      continue;
+    }
+
+    const baseWords = baseTrack.words;
+    if (
+      baseWords.length <= effectiveWordsPerLine &&
+      baseTrack.text.length <= safeMaxChars + 8
+    ) {
+      regrouped.push({ ...seg, displayLineNumber: runningLineNum++ });
+      continue;
+    }
+
+    // Partition baseWords into slices of <= effectiveWordsPerLine and <= safeMaxChars
+    const slices: { startIdx: number; endIdx: number }[] = [];
+    let curStart = 0;
+    let curChars = 0;
+
+    for (let i = 0; i < baseWords.length; i++) {
+      const wLen = baseWords[i].word.length;
+      const countInSlice = i - curStart + 1;
+      const nextChars = curChars === 0 ? wLen : curChars + 1 + wLen;
+
+      if (
+        countInSlice > effectiveWordsPerLine ||
+        (countInSlice > 1 && nextChars > safeMaxChars)
+      ) {
+        slices.push({ startIdx: curStart, endIdx: i - 1 });
+        curStart = i;
+        curChars = wLen;
+      } else {
+        curChars = nextChars;
+      }
+    }
+    if (curStart < baseWords.length) {
+      slices.push({ startIdx: curStart, endIdx: baseWords.length - 1 });
+    }
+
+    if (slices.length <= 1) {
+      regrouped.push({ ...seg, displayLineNumber: runningLineNum++ });
+      continue;
+    }
+
+    // Distribute segment time proportionally by character/syllable weight across slices so slices NEVER overlap or bunch
+    const segStart = seg.startTime;
+    const segDuration = Math.max(0.25 * slices.length, seg.endTime - seg.startTime);
+    const sliceWeights = slices.map((sl) => {
+      let w = 0;
+      for (let k = sl.startIdx; k <= sl.endIdx; k++) {
+        w += Math.max(2, baseWords[k]?.word.length || 3);
+      }
+      return Math.max(2, w);
+    });
+    const totalSliceWeight = sliceWeights.reduce((a, b) => a + b, 0) || 1;
+
+    const totalWords = baseWords.length;
+    let sliceCursor = segStart;
+
+    slices.forEach((sl, sIdx) => {
+      const sliceDur = (sliceWeights[sIdx] / totalSliceWeight) * segDuration;
+      const sliceStart = Number(sliceCursor.toFixed(2));
+      const sliceEnd =
+        sIdx === slices.length - 1
+          ? Number(Math.max(sliceStart + 0.18, seg.endTime).toFixed(2))
+          : Number(Math.max(sliceStart + 0.18, sliceCursor + sliceDur).toFixed(2));
+      sliceCursor = sliceEnd;
+
+      const fracStart = sl.startIdx / totalWords;
+      const fracEnd = (sl.endIdx + 1) / totalWords;
+
+      const newTracks: CaptionSegment['tracks'] = {};
+      (Object.keys(seg.tracks) as TrackKey[]).forEach((tk) => {
+        const tr = seg.tracks[tk];
+        if (!tr || tr.words.length === 0) return;
+        if (tk === primaryTrackKey || tr.words.length === baseWords.length) {
+          const subWords = tr.words.slice(sl.startIdx, sl.endIdx + 1);
+          const subText = subWords.map((w) => w.word).join(' ');
+          newTracks[tk] = {
+            text: subText,
+            words: buildWordTimingsClient(subText, sliceStart, sliceEnd, subWords),
+          };
+        } else {
+          const tLen = tr.words.length;
+          const tStartIdx = Math.min(tLen - 1, Math.floor(fracStart * tLen));
+          const tEndIdx = Math.max(
+            tStartIdx + 1,
+            sIdx === slices.length - 1 ? tLen : Math.round(fracEnd * tLen)
+          );
+          const subWords = tr.words.slice(tStartIdx, tEndIdx);
+          const subText = subWords.map((w) => w.word).join(' ');
+          newTracks[tk] = {
+            text: subText,
+            words: buildWordTimingsClient(subText, sliceStart, sliceEnd, subWords),
+          };
+        }
+      });
+
+      regrouped.push({
+        ...seg,
+        id: `${seg.id}-w${effectiveWordsPerLine}-${sIdx}`,
+        displayLineNumber: runningLineNum++,
+        startTime: sliceStart,
+        endTime: sliceEnd,
+        tracks: newTracks,
+      });
+    });
+  }
+
+  return regrouped;
+}
+
+/**
+ * 100% VERBATIM 16kHz SPEECH AUDIO & VIDEO EXTRACTION ENGINE:
+ * 1. Decodes the uploaded video/audio file and extracts a 96-bin real audio waveform for the timeline.
+ * 2. Applies Windowed Automatic Gain Control (AGC) across 400ms windows so soft-spoken words,
+ *    fast syllables, and trailing words are boosted to crystal-clear studio volume.
+ * 3. Splits videos > 16s into ~14s chunks at natural low-energy silence dips so Gemini processes
+ *    short, focused audio windows and NEVER skips or summarizes a single spoken word.
+ */
 export async function extractAudioChunksFromVideo(
   file: File,
   onProgress?: (stage: string) => void,
   onFirstChunkReady?: (firstChunk: AudioChunkPayload) => void
 ): Promise<AudioChunkPayload[]> {
-  onProgress?.('Instant Mode: Extracting audio & voice sync (0:00)...');
+  onProgress?.('Analyzing audio waveform & enhancing speech clarity for 100% verbatim captions...');
   const probedDuration = await probeMediaDuration(file);
 
   try {
@@ -917,28 +1062,87 @@ export async function extractAudioChunksFromVideo(
       Math.min(decodedBuffer.duration || probedDuration, 600).toFixed(2)
     );
     const sourceSampleRate = decodedBuffer.sampleRate || 44100;
-    const targetSampleRate = 8000; // 8kHz mono PCM: <380KB per chunk, never hits proxy limits
+    const targetSampleRate = 16000; // 16kHz studio ASR standard
     const ratio = sourceSampleRate / targetSampleRate;
 
     const srcChannel0 = decodedBuffer.getChannelData(0);
     const srcChannel1 =
       decodedBuffer.numberOfChannels > 1 ? decodedBuffer.getChannelData(1) : null;
 
-    // Build chunk boundaries: first chunk 0–15s for instant 0:00 playback, then 24s chunks
-    const boundaries: { start: number; end: number }[] = [];
-    let cursor = 0;
-    while (cursor < totalDuration - 0.25) {
-      const windowLen = cursor === 0 ? 15 : 24;
-      const nextEnd = Number(Math.min(totalDuration, cursor + windowLen).toFixed(2));
-      boundaries.push({ start: Number(cursor.toFixed(2)), end: nextEnd });
-      cursor = nextEnd;
+    // 1. Compute 96-bin real waveform bars across the full video for the Studio Timeline
+    const waveformBars: number[] = [];
+    const numBars = 96;
+    const samplesPerBar = Math.max(1, Math.floor(srcChannel0.length / numBars));
+    let maxBarRms = 0.001;
+    const rawBarRms: number[] = [];
+    for (let b = 0; b < numBars; b++) {
+      const startIdx = b * samplesPerBar;
+      const endIdx = Math.min(srcChannel0.length, startIdx + samplesPerBar);
+      const step = Math.max(1, Math.floor((endIdx - startIdx) / 256));
+      let sumSq = 0;
+      let count = 0;
+      for (let idx = startIdx; idx < endIdx; idx += step) {
+        const val = srcChannel1 ? (srcChannel0[idx] + srcChannel1[idx]) * 0.5 : srcChannel0[idx];
+        sumSq += val * val;
+        count++;
+      }
+      const rms = count > 0 ? Math.sqrt(sumSq / count) : 0;
+      rawBarRms.push(rms);
+      if (rms > maxBarRms) maxBarRms = rms;
     }
-    if (boundaries.length === 0) {
-      boundaries.push({ start: 0, end: Math.max(5, totalDuration) });
+    for (let b = 0; b < numBars; b++) {
+      const normalized = Math.min(1, Math.pow(rawBarRms[b] / maxBarRms, 0.65));
+      waveformBars.push(Math.round(14 + normalized * 78));
+    }
+
+    // Check overall peak to ensure decoded buffer actually contains audio
+    if (maxBarRms < 0.0003) {
+      throw new Error('Decoded audio track was silent; falling back to direct video stream.');
+    }
+
+    // 2. Split into ~14s chunks at quiet energy valleys so Gemini transcribes every single word without skipping
+    const boundaries: { start: number; end: number }[] = [];
+    if (totalDuration <= 16) {
+      boundaries.push({ start: 0, end: totalDuration });
+    } else {
+      let cursor = 0;
+      const WINDOW_SEC = 14;
+      while (cursor < totalDuration - 0.4) {
+        let nextEnd = Number(Math.min(totalDuration, cursor + WINDOW_SEC).toFixed(2));
+        if (totalDuration - nextEnd < 3.5) {
+          // Avoid leaving a tiny <3.5s tail chunk
+          nextEnd = totalDuration;
+        } else {
+          // Find lowest energy breath pause between (nextEnd - 2.2s) and (nextEnd + 1.5s)
+          const searchStartSec = Math.max(cursor + 8, nextEnd - 2.2);
+          const searchEndSec = Math.min(totalDuration - 1, nextEnd + 1.5);
+          let bestSec = nextEnd;
+          let minEnergy = Infinity;
+          for (let t = searchStartSec; t <= searchEndSec; t += 0.05) {
+            const idxStart = Math.floor(t * sourceSampleRate);
+            const idxEnd = Math.min(
+              srcChannel0.length,
+              idxStart + Math.floor(0.06 * sourceSampleRate)
+            );
+            let sum = 0;
+            for (let j = idxStart; j < idxEnd; j += 6) {
+              sum += Math.abs(srcChannel0[j]);
+            }
+            if (sum < minEnergy) {
+              minEnergy = sum;
+              bestSec = Number(t.toFixed(2));
+            }
+          }
+          nextEnd = bestSec;
+        }
+        boundaries.push({ start: Number(cursor.toFixed(2)), end: nextEnd });
+        cursor = nextEnd;
+      }
     }
 
     const totalChunks = boundaries.length;
     const chunks: AudioChunkPayload[] = [];
+    const boxSize = Math.max(1, Math.round(ratio));
 
     for (let i = 0; i < totalChunks; i++) {
       const { start: chunkStart, end: chunkEnd } = boundaries[i];
@@ -949,25 +1153,42 @@ export async function extractAudioChunksFromVideo(
       const downsampled = new Float32Array(outSampleCount);
       const startSrcIdx = Math.floor(chunkStart * sourceSampleRate);
 
-      let peak = 0;
       for (let s = 0; s < outSampleCount; s++) {
-        const srcIdx = Math.min(
-          srcChannel0.length - 1,
-          startSrcIdx + Math.floor(s * ratio)
-        );
-        const val = srcChannel1
-          ? (srcChannel0[srcIdx] + srcChannel1[srcIdx]) * 0.5
-          : srcChannel0[srcIdx];
-        downsampled[s] = val;
-        const abs = Math.abs(val);
-        if (abs > peak) peak = abs;
+        const baseIdx = startSrcIdx + Math.floor(s * ratio);
+        let acc = 0;
+        let count = 0;
+        for (let b = 0; b < boxSize; b++) {
+          const idx = baseIdx + b;
+          if (idx >= srcChannel0.length) break;
+          const sampleVal = srcChannel1
+            ? (srcChannel0[idx] + srcChannel1[idx]) * 0.5
+            : srcChannel0[idx];
+          acc += sampleVal;
+          count++;
+        }
+        downsampled[s] = count > 0 ? acc / count : 0;
       }
 
-      // Normalize audio gain in each chunk so quiet speech is crystal clear
-      if (peak > 0.003 && peak < 0.85) {
-        const gain = Math.min(5.0, 0.88 / peak);
-        for (let s = 0; s < outSampleCount; s++) {
-          downsampled[s] = Math.max(-1, Math.min(1, downsampled[s] * gain));
+      // 3. Apply Windowed Automatic Gain Control (AGC) across 400ms blocks so quiet words are crystal clear
+      const agcWindowSamples = Math.floor(0.4 * targetSampleRate);
+      for (let wStart = 0; wStart < outSampleCount; wStart += agcWindowSamples) {
+        const wEnd = Math.min(outSampleCount, wStart + agcWindowSamples);
+        let winPeak = 0;
+        let winSumSq = 0;
+        for (let k = wStart; k < wEnd; k++) {
+          const abs = Math.abs(downsampled[k]);
+          if (abs > winPeak) winPeak = abs;
+          winSumSq += downsampled[k] * downsampled[k];
+        }
+        const winRms = Math.sqrt(winSumSq / Math.max(1, wEnd - wStart));
+        // Boost quiet spoken syllables without amplifying pure silence noise floor
+        if (winRms > 0.004 && winPeak > 0.008 && winPeak < 0.85) {
+          const targetGain = Math.min(5.5, 0.78 / winPeak);
+          for (let k = wStart; k < wEnd; k++) {
+            const boosted = downsampled[k] * targetGain;
+            // Soft-clipping limiter
+            downsampled[k] = Math.tanh(boosted);
+          }
         }
       }
 
@@ -987,6 +1208,7 @@ export async function extractAudioChunksFromVideo(
         chunkIndex: i,
         totalChunks,
         speechWindows,
+        waveformBars: i === 0 ? waveformBars : undefined,
       };
 
       chunks.push(payload);
@@ -998,51 +1220,26 @@ export async function extractAudioChunksFromVideo(
 
     return chunks;
   } catch (_err) {
-    // Safe fallback when browser cannot decode container audio directly:
-    // Never exceed 6MB raw payload so reverse proxies never return 413 <!doctype html>
-    onProgress?.('Instant Mode: Preparing compact audio chunks...');
-    const totalDuration = Math.max(10, Math.min(probedDuration, 180));
-    const CHUNK_SECONDS = 20;
-    const totalChunks = Math.max(1, Math.ceil(totalDuration / CHUNK_SECONDS));
-    const chunks: AudioChunkPayload[] = [];
+    // Direct Video/Audio Container Fallback: send the real uploaded media file directly to Gemini!
+    onProgress?.('Sending video stream directly for 100% verbatim AI transcription...');
+    const totalDuration = Math.max(3, Math.min(probedDuration || 30, 180));
+    const buf = await file.arrayBuffer();
+    const fallbackBase64 = arrayBufferToBase64(buf);
+    const fallbackMime = file.type || 'video/mp4';
 
-    let fallbackBase64 = '';
-    let fallbackMime = 'audio/wav';
-
-    if (file.size <= 6 * 1024 * 1024) {
-      const buf = await file.arrayBuffer();
-      fallbackBase64 = arrayBufferToBase64(buf);
-      fallbackMime = file.type || 'video/mp4';
-    } else {
-      // Generate a lightweight 1-second 8kHz WAV envelope so the request stays <20KB
-      const silentSamples = new Float32Array(8000);
-      fallbackBase64 = arrayBufferToBase64(encodeWAV(silentSamples, 8000));
-      fallbackMime = 'audio/wav';
+    const payload: AudioChunkPayload = {
+      mediaBase64: fallbackBase64,
+      mimeType: fallbackMime,
+      chunkStartTime: 0,
+      chunkDuration: totalDuration,
+      totalDuration,
+      chunkIndex: 0,
+      totalChunks: 1,
+    };
+    if (onFirstChunkReady) {
+      onFirstChunkReady(payload);
     }
-
-    for (let i = 0; i < totalChunks; i++) {
-      const chunkStart = Number((i * CHUNK_SECONDS).toFixed(2));
-      const chunkEnd = Number(
-        Math.min(totalDuration, (i + 1) * CHUNK_SECONDS).toFixed(2)
-      );
-      const chunkDuration = Number((chunkEnd - chunkStart).toFixed(2));
-      if (chunkDuration < 0.25) continue;
-
-      const payload: AudioChunkPayload = {
-        mediaBase64: fallbackBase64,
-        mimeType: fallbackMime,
-        chunkStartTime: chunkStart,
-        chunkDuration,
-        totalDuration,
-        chunkIndex: i,
-        totalChunks,
-      };
-      chunks.push(payload);
-      if (i === 0 && onFirstChunkReady) {
-        onFirstChunkReady(payload);
-      }
-    }
-    return chunks;
+    return [payload];
   }
 }
 
@@ -1172,9 +1369,62 @@ export function getSupportedExportMimeType(format: VideoExportFormat): {
   };
 }
 
+export function generatePremiereDaVinciXML(
+  segments: CaptionSegment[],
+  primaryTrack: TrackKey,
+  totalDuration = 30
+): string {
+  const safeDur = Math.max(1, Math.ceil(totalDuration));
+  const escapeXml = (str: string) =>
+    (str || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&apos;');
+
+  const titlesXml = segments
+    .map((seg, idx) => {
+      const text = escapeXml(seg.tracks[primaryTrack]?.text || '');
+      const offsetSec = Math.max(0, Number(seg.startTime.toFixed(2)));
+      const durSec = Math.max(0.2, Number((seg.endTime - seg.startTime).toFixed(2)));
+      return `            <title name="Kalakar Caption ${idx + 1}" lane="1" offset="${offsetSec}s" duration="${durSec}s" start="0s">
+              <text>
+                <text-style ref="ts${idx + 1}">${text}</text-style>
+              </text>
+              <text-style-def id="ts${idx + 1}">
+                <text-style font="Plus Jakarta Sans" fontSize="64" fontFace="Bold" fontColor="1 0.84 0.04 1" alignment="center" />
+              </text-style-def>
+            </title>`;
+    })
+    .join('\n');
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fcpxml>
+<fcpxml version="1.9">
+  <resources>
+    <format id="r1" name="FFVideoFormat1080p60" frameDuration="100/6000s" width="1080" height="1920" colorSpace="1-1-1 (Rec. 709)" />
+  </resources>
+  <library>
+    <event name="Kalakar Studio Captions (${primaryTrack.toUpperCase()})">
+      <project name="Kalakar_${primaryTrack}_Timeline">
+        <sequence format="r1" duration="${safeDur}s" tcStart="0s" tcFormat="NDF">
+          <spine>
+            <gap name="Kalakar Base Track" offset="0s" duration="${safeDur}s" start="0s">
+${titlesXml}
+            </gap>
+          </spine>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>`;
+}
+
 export async function exportStandaloneAudioWAV(
   file: File | null,
-  fallbackDuration = 12
+  fallbackDuration = 12,
+  enhanceAudio = true
 ): Promise<Blob> {
   const AudioCtx =
     window.AudioContext ||
@@ -1190,7 +1440,39 @@ export async function exportStandaloneAudioWAV(
       const offline = new OfflineAudioContext(1, totalSamples, sampleRate);
       const src = offline.createBufferSource();
       src.buffer = decoded;
-      src.connect(offline.destination);
+
+      if (enhanceAudio) {
+        // Kalakar AI Audio Enhancer DSP: 85Hz Traffic/Rumble High-Pass + 3.2kHz Voice Clarity Boost + 8.5kHz Hiss Cut + Studio Compressor
+        const highPass = offline.createBiquadFilter();
+        highPass.type = 'highpass';
+        highPass.frequency.value = 85;
+
+        const vocalPresence = offline.createBiquadFilter();
+        vocalPresence.type = 'peaking';
+        vocalPresence.frequency.value = 3200;
+        vocalPresence.Q.value = 1.1;
+        vocalPresence.gain.value = 4.5;
+
+        const hissCut = offline.createBiquadFilter();
+        hissCut.type = 'lowpass';
+        hissCut.frequency.value = 8800;
+
+        const compressor = offline.createDynamicsCompressor();
+        compressor.threshold.value = -22;
+        compressor.knee.value = 18;
+        compressor.ratio.value = 3.5;
+        compressor.attack.value = 0.004;
+        compressor.release.value = 0.18;
+
+        src.connect(highPass);
+        highPass.connect(vocalPresence);
+        vocalPresence.connect(hissCut);
+        hissCut.connect(compressor);
+        compressor.connect(offline.destination);
+      } else {
+        src.connect(offline.destination);
+      }
+
       src.start(0);
       const rendered = await offline.startRendering();
       const wavBuffer = encodeWAV(rendered.getChannelData(0), sampleRate);

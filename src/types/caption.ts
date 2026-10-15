@@ -4,6 +4,8 @@ export type TrackKey =
   | 'telugu'
   | 'hinglish'
   | 'hindi'
+  | 'roman_urdu'
+  | 'urdu'
   | 'tanglish'
   | 'tamil'
   | 'kanglish'
@@ -14,7 +16,23 @@ export type TrackKey =
   | 'bengali'
   | 'gujarati'
   | 'punjabi'
-  | 'odia';
+  | 'odia'
+  | 'sindhi'
+  | 'nepali'
+  | 'assamese'
+  | 'kashmiri'
+  | 'pashto';
+
+export type VideoAspectRatio = '9:16' | '16:9' | '1:1';
+
+export interface AudioEnhancerConfig {
+  enabled: boolean;
+  noiseReductionDb: number;
+  voiceClarityBoost: number;
+  studioWarmth?: number;
+  loudnessNormalize?: boolean;
+  remainingCredits?: number;
+}
 
 export interface LanguageMetadata {
   key: TrackKey;
@@ -23,6 +41,7 @@ export interface LanguageMetadata {
   nativeName: string;
   region: string;
   isRomanized: boolean;
+  isRTL?: boolean;
   recommendedFont: string;
   scriptInstruction: string;
   coreGenerated: boolean;
@@ -45,9 +64,27 @@ export interface WordTiming {
   word: string;
   startTime: number;
   endTime: number;
-  isHero?: boolean; // Big highlighted word in SIDZ / Premiere Pro mixed-scale mode
+  isHero?: boolean; // Big highlighted / emphasized word (green chip in Kalakar list)
   heroReason?: HeroReason;
   heroScore?: number;
+  // Section 5.3 Per-word styling overrides
+  customColor?: string;
+  customFontFamily?: string;
+  customScale?: number;
+  isUnderlined?: boolean;
+}
+
+export interface LineStyleOverride {
+  templateId?: string;
+  fontFamily?: string;
+  fontFace?: string;
+  fontSize?: number;
+  backgroundEnabled?: boolean;
+  positionX?: number;
+  positionY?: number;
+  primaryColor?: string;
+  secondaryColor?: string;
+  emphasisMode?: 'emphasize' | 'spotlight';
 }
 
 export interface CaptionTrackData {
@@ -60,7 +97,19 @@ export interface CaptionSegment {
   startTime: number;
   endTime: number;
   tracks: Partial<Record<TrackKey, CaptionTrackData>>;
+  displayLineNumber?: number;
+  // Section 5.1 & 5.2 Per-line Kalakar actions & line styling popup
+  arcCurveDeg?: number; // Curve into an arch (-45 to +45, 0 = flat)
+  spreadWords?: boolean; // Spread the words across the line
+  behindSubject?: boolean; // Put behind the subject (Masking)
+  lineStyleOverride?: LineStyleOverride;
+  // Open-Source SFX & AI B-Roll per-line context
+  sfxType?: 'whoosh' | 'bell' | 'pop' | 'cash' | 'riser' | 'impact' | 'none';
+  brollTheme?: 'wealth' | 'mindset' | 'community' | 'tech' | 'cinema' | 'none';
+  brollTitle?: string;
+  brollImageUrl?: string;
 }
+
 
 export type AnimationType =
   | 'premiere-pro'
@@ -102,6 +151,33 @@ export type CaptionFrameStyle =
   | 'ig-neon-border'
   | 'premiere-bounding-box';
 
+export type SafeZonePreset =
+  | 'instagram-reels'
+  | 'instagram-story'
+  | 'instagram-feed'
+  | 'tiktok-foryou'
+  | 'youtube-shorts';
+
+export interface VideoClipEditConfig {
+  zoomX: number; // % default 100
+  zoomY: number; // % default 100
+  zoomLinked: boolean;
+  positionX: number; // px default 0
+  positionY: number; // px default 0
+  rotation: number; // deg default 0
+  flipHorizontal: boolean;
+  flipVertical: boolean;
+  cropLeft: number; // % default 0
+  cropRight: number; // % default 0
+  cropTop: number; // % default 0
+  cropBottom: number; // % default 0
+  cropSoftness: number; // px default 0
+  cropRounded: number; // px default 0
+  opacity: number; // % default 100
+  volume: number; // % default 100
+  muted: boolean;
+}
+
 export interface GradientPreset {
   id: string;
   name: string;
@@ -137,7 +213,9 @@ export interface CaptionStyleConfig {
   hierarchyMode: HierarchyMode;
   primaryTrack: TrackKey;
   secondaryTrack: TrackKey;
+  aspectRatio?: VideoAspectRatio;
   fontFamily: string;
+  fontFace?: string;
   heroWordFontFamily: string;
   accentScriptFontFamily?: string;
   secondaryFontFamily: string;
@@ -147,7 +225,8 @@ export interface CaptionStyleConfig {
   bigWordScale: number;
   secondaryFontSize: number;
   fontWeight: number;
-  textTransform: 'none' | 'uppercase' | 'capitalize';
+  textTransform: 'none' | 'uppercase' | 'capitalize' | 'lowercase';
+  underlineText?: boolean;
   primaryColor: string;
   highlightColor: string;
   secondaryColor: string;
@@ -159,11 +238,19 @@ export interface CaptionStyleConfig {
   gradientFourth?: string;
   gradientDirection?: GradientDirection;
   gradientAngle?: number;
+  gradientLevel?: 'word' | 'char';
   gradientSpeed: number;
   strokeColor: string;
   strokeWidth: number;
+  strokeEnabled?: boolean;
+  strokeOpacity?: number;
   backgroundColor: string;
   backgroundOpacity: number;
+  bgBorderRadius?: number;
+  bgWidthPad?: number;
+  bgHeightPad?: number;
+  bgDropShadow?: boolean;
+  bgOutline?: boolean;
   positionX: number;
   positionY: number;
   // Individual Layer X/Y Offsets (% of canvas) & Individual Alignments
@@ -185,10 +272,59 @@ export interface CaptionStyleConfig {
   verticalSpacing: number;
   horizontalSpacing: number;
   wordsPerLine: number;
+  maxCharsPerLine?: number;
+  maxLinesPerCaption?: number;
+  removePunctuation?: boolean;
+  removeEmphasis?: boolean;
+  removeGaps?: boolean;
+  removeEmojis?: boolean;
+  captionDelaySeconds?: number;
   animationSpeed: number;
   shadowBlur: number;
+  // Section 7.5 Emphasis
+  emphasisMode?: 'emphasize' | 'spotlight';
+  emphasisGlowColor?: string;
+  emphasisFontFace?: string;
+  emphasisTransform?: 'none' | 'uppercase' | 'lowercase' | 'capitalize';
+  emphasisUnderline?: boolean;
+  // Section 7.7 Effects (Drop Shadow, Glow, 3D Depth, Arc)
+  dropShadowEnabled?: boolean;
+  dropShadowColor?: string;
+  dropShadowOpacity?: number;
+  dropShadowX?: number;
+  dropShadowY?: number;
+  dropShadowBlur?: number;
+  glowEnabled?: boolean;
+  glowColor?: string;
+  glowOpacity?: number;
+  glowSpread?: number;
+  glowIntensity?: number;
+  depth3DEnabled?: boolean;
+  depth3DColor?: string;
+  depth3DOpacity?: number;
+  depth3DDepth?: number;
+  depth3DAngle?: number;
+  arcEnabled?: boolean;
+  arcShape?: 'arch' | 'valley' | 'globe' | 'dome' | 'sphere' | 'curve';
+  arcCurveDeg?: number;
+  arcHeight?: number;
+  arcLineGap?: number;
+  arcBendBlock?: boolean;
+  arcFollowCurve?: boolean;
+  // Section 9 Transitions (IN / HOLD / OUT)
+  transitionScope?: 'all' | 'emphasized';
+  transitionSameAsOther?: boolean;
+  transitionIn?: string;
+  transitionHold?: string;
+  transitionOut?: string;
+  // Section 4.1 Preview Bar & Safe Zones
   showScrim: boolean;
   showSafeZones: boolean;
+  safeZonePreset?: SafeZonePreset;
+  safeZoneOpacity?: number;
+  lowResPreview?: boolean;
+  isCanvasLocked?: boolean;
+  canvasPositionLocked?: boolean;
   // CapCut / Premiere Pro / Photoshop Mask Studio
   maskMode: MaskMode;
   maskColor: string;
@@ -203,7 +339,17 @@ export interface CaptionStyleConfig {
   // Instagram Frame & Dynamic Text Callout Frame
   showInstagramFrame: boolean;
   captionFrameStyle: CaptionFrameStyle;
+  // Section 11 Video Clip Edit Tab
+  videoClipEdit?: VideoClipEditConfig;
+  // Open-Source Auto SFX & AI B-Roll Cutaway Settings
+  autoSfxEnabled?: boolean;
+  sfxVolume?: number;
+  brollEnabled?: boolean;
+  brollDisplayMode?: 'pip' | 'fullscreen';
+  // Real-Time AI Subject Cutout & Behind-Head Depth Masking
+  captionDepthBehindSubject?: boolean;
 }
+
 
 export interface StylePreset {
   id: string;
@@ -213,6 +359,9 @@ export interface StylePreset {
   smallPreviewText?: string;
   scriptPreviewText?: string;
   previewBg: string;
+  isPremium?: boolean;
+  category?: string;
+  creatorCategory?: string;
   config: Partial<CaptionStyleConfig>;
 }
 
