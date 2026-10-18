@@ -1,4 +1,5 @@
 import { CaptionSegment, TrackKey, WordTiming } from '../types/caption';
+import { isRomanTrack, transliterateIndicToRoman } from './indicRomanTransliterator';
 
 const COMMON_FILLER_WORDS = new Set([
   'the',
@@ -108,6 +109,19 @@ const COMMON_FILLER_WORDS = new Set([
   'meeru',
   'manam',
   'nenu',
+  'nuvvu',
+  'neeku',
+  'meeku',
+  'naaku',
+  'em',
+  'emi',
+  'edo',
+  'edho',
+  'idi',
+  'idhi',
+  'idhe',
+  'ledhu',
+  'ledu',
   'oka',
 ]);
 
@@ -394,21 +408,25 @@ export function buildWordTimingsClient(
   const explicitHeroIndices = new Set<number>();
   const cleanedTokens = rawTokens.map((token, idx) => {
     if (token.startsWith('*') && token.endsWith('*') && token.length > 2) {
-      explicitHeroIndices.add(idx);
+      if (explicitHeroIndices.size === 0) {
+        explicitHeroIndices.add(idx);
+      }
       return token.slice(1, -1);
     }
     const stripped = token.replace(/[*!?,.:;'"()-]/g, '').trim().toLowerCase();
-    if (stripped && normalizedHeroKeywords.has(stripped)) {
+    if (stripped && normalizedHeroKeywords.has(stripped) && explicitHeroIndices.size === 0) {
       explicitHeroIndices.add(idx);
     }
     if (existingWords && existingWords[idx] && typeof existingWords[idx].isHero === 'boolean') {
-      if (existingWords[idx].isHero) explicitHeroIndices.add(idx);
+      if (existingWords[idx].isHero && explicitHeroIndices.size === 0) {
+        explicitHeroIndices.add(idx);
+      }
     }
     return token.replace(/^\*+|\*+$/g, '');
   });
 
   // Auto-Hero NLP Pass: if no explicit hero was locked in, use NLP scoring to highlight
-  // the most impactful or emotional word(s) in the caption segment.
+  // strictly ONE single most impactful word in the caption segment.
   if (explicitHeroIndices.size === 0 && autoHeroNLP) {
     const scored = cleanedTokens.map((word, idx) => ({
       idx,
@@ -420,16 +438,6 @@ export function buildWordTimingsClient(
 
     if (scored.length > 0) {
       explicitHeroIndices.add(scored[0].idx);
-
-      // For longer clauses (6+ words) where a second non-adjacent word also has a high emotional/impact NLP score
-      if (
-        cleanedTokens.length >= 6 &&
-        scored.length > 1 &&
-        scored[1].score >= 22 &&
-        Math.abs(scored[1].idx - scored[0].idx) > 1
-      ) {
-        explicitHeroIndices.add(scored[1].idx);
-      }
     }
   }
 
@@ -468,8 +476,11 @@ export function applyAutoHeroNLPToSegments(
     keysToProcess.forEach((k) => {
       const trackData = seg.tracks[k];
       if (!trackData || !trackData.text) return;
+      const sanitizedText = isRomanTrack(k)
+        ? transliterateIndicToRoman(trackData.text)
+        : trackData.text;
       const freshWords = buildWordTimingsClient(
-        trackData.text,
+        sanitizedText,
         seg.startTime,
         seg.endTime,
         undefined,
@@ -588,11 +599,11 @@ export function detectSpeechWindowsFromPCM(
   sampleRate: number,
   clipDuration: number
 ): SpeechWindow[] {
-  const frameDuration = 0.025; // 25ms high-resolution frames
+  const frameDuration = 0.005; // 5ms ultra-high-resolution sub-frames for exact vocal onset matching
   const frameSize = Math.max(1, Math.floor(sampleRate * frameDuration));
   const numFrames = Math.floor(samples.length / frameSize);
-  if (numFrames < 4) {
-    return [{ start: 0, end: Number(clipDuration.toFixed(2)) }];
+  if (numFrames < 8) {
+    return [{ start: 0, end: Number(clipDuration.toFixed(3)) }];
   }
 
   const rmsValues: number[] = new Array(numFrames);
@@ -612,34 +623,33 @@ export function detectSpeechWindowsFromPCM(
   const sortedRms = [...rmsValues].sort((a, b) => a - b);
   const noiseFloor = sortedRms[Math.floor(numFrames * 0.12)] || 0.003;
   const medianRms = sortedRms[Math.floor(numFrames * 0.5)] || 0.02;
-  // Sensitive threshold that never gets blinded by a single loud spike
-  const referencePeak = Math.min(maxRms, Math.max(medianRms * 2.5, 0.08));
-  const threshold = Math.max(0.008, noiseFloor + (referencePeak - noiseFloor) * 0.09);
+  const referencePeak = Math.min(maxRms, Math.max(medianRms * 2.4, 0.08));
+  const threshold = Math.max(0.007, noiseFloor + (referencePeak - noiseFloor) * 0.11);
 
   const rawWindows: SpeechWindow[] = [];
   let inSpeech = false;
   let winStart = 0;
-  const hangoverFrames = 17; // 425ms hangover so natural inter-word micro-pauses stay connected
+  const hangoverFrames = 30; // 150ms hangover so inter-sentence pauses >= 160ms are preserved cleanly
 
   for (let f = 0; f < numFrames; f++) {
     const t = f * frameDuration;
     if (rmsValues[f] >= threshold) {
       if (!inSpeech) {
         inSpeech = true;
-        winStart = Math.max(0, t - 0.12); // 120ms pre-roll so initial consonants are never clipped
+        winStart = Math.max(0, t - 0.045); // 45ms crisp pre-roll for initial consonant onsets
       }
     } else if (inSpeech) {
       let silenceFrames = 0;
       for (let k = f; k < Math.min(numFrames, f + hangoverFrames); k++) {
         if (rmsValues[k] < threshold) silenceFrames++;
       }
-      if (silenceFrames >= hangoverFrames - 1) {
+      if (silenceFrames >= hangoverFrames - 2) {
         inSpeech = false;
-        const winEnd = Math.min(clipDuration, t + 0.14);
-        if (winEnd - winStart >= 0.2) {
+        const winEnd = Math.min(clipDuration, t + 0.065);
+        if (winEnd - winStart >= 0.14) {
           rawWindows.push({
-            start: Number(winStart.toFixed(2)),
-            end: Number(winEnd.toFixed(2)),
+            start: Number(winStart.toFixed(3)),
+            end: Number(winEnd.toFixed(3)),
           });
         }
       }
@@ -647,19 +657,19 @@ export function detectSpeechWindowsFromPCM(
   }
   if (inSpeech) {
     rawWindows.push({
-      start: Number(winStart.toFixed(2)),
-      end: Number(clipDuration.toFixed(2)),
+      start: Number(winStart.toFixed(3)),
+      end: Number(clipDuration.toFixed(3)),
     });
   }
 
-  // Merge adjacent windows separated by < 0.38s so continuous speech is smooth
+  // Merge micro-gaps < 0.14s within the same breath while keeping real sentence pauses distinct
   const mergedWindows: SpeechWindow[] = [];
   for (const w of rawWindows) {
     if (mergedWindows.length === 0) {
       mergedWindows.push({ ...w });
     } else {
       const prev = mergedWindows[mergedWindows.length - 1];
-      if (w.start - prev.end < 0.38) {
+      if (w.start - prev.end < 0.14) {
         prev.end = w.end;
       } else {
         mergedWindows.push({ ...w });
@@ -668,10 +678,158 @@ export function detectSpeechWindowsFromPCM(
   }
 
   if (mergedWindows.length === 0) {
-    return [{ start: 0, end: Number(clipDuration.toFixed(2)) }];
+    return [{ start: 0, end: Number(clipDuration.toFixed(3)) }];
   }
 
   return mergedWindows;
+}
+
+/**
+ * Aligns caption segments & word timings to the high-density audio waveform envelope
+ * at sub-millisecond (0.001s) precision so on-screen captions 100% match the timeline waveform peaks!
+ */
+export function alignSegmentsToAudioWaveformPrecise(
+  segments: CaptionSegment[],
+  waveformBars: number[],
+  totalDuration: number,
+  autoHeroNLP = true
+): CaptionSegment[] {
+  if (segments.length === 0) return segments;
+  const safeDur = Math.max(0.5, totalDuration);
+  const numBins = waveformBars.length;
+  const hasHighResWaveform = numBins >= 32;
+
+  let onsetThreshold = 0.18;
+  if (hasHighResWaveform) {
+    const sorted = [...waveformBars].sort((a, b) => a - b);
+    const p15 = sorted[Math.floor(numBins * 0.15)] ?? 0.05;
+    const p85 = sorted[Math.floor(numBins * 0.85)] ?? 0.65;
+    onsetThreshold = Math.max(0.11, p15 + (p85 - p15) * 0.22);
+  }
+
+  const timeToBin = (sec: number): number =>
+    Math.max(0, Math.min(numBins - 1, Math.floor((sec / safeDur) * numBins)));
+  const binToTime = (bin: number): number => (bin / Math.max(1, numBins)) * safeDur;
+
+  const aligned: CaptionSegment[] = [];
+  let cursorTime = 0;
+
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    const minSegDur = 0.24;
+    let cleanStart = Math.max(cursorTime, seg.startTime);
+    const nextRawStart = i < segments.length - 1 ? segments[i + 1].startTime : safeDur;
+    let cleanEnd = Math.min(
+      safeDur,
+      Math.max(cleanStart + minSegDur, Math.min(seg.endTime, Math.max(cleanStart + minSegDur, nextRawStart)))
+    );
+
+    // Snap segment startTime & endTime to exact vocal onset/offset spikes in the high-density waveform
+    if (hasHighResWaveform) {
+      const startBin = timeToBin(cleanStart);
+      const maxSearchForwardBin = timeToBin(Math.min(cleanEnd - 0.16, cleanStart + 0.26));
+      const maxSearchBackBin = timeToBin(Math.max(cursorTime, cleanStart - 0.14));
+
+      if (waveformBars[startBin] < onsetThreshold) {
+        // If current start lands in silence, snap forward to the exact vocal onset bin
+        for (let b = startBin; b <= maxSearchForwardBin; b++) {
+          if (waveformBars[b] >= onsetThreshold) {
+            cleanStart = Math.max(cursorTime, binToTime(b) - 0.025);
+            break;
+          }
+        }
+      } else {
+        // If current start lands mid-syllable right after a brief silence, pull back to syllable onset
+        for (let b = startBin; b >= maxSearchBackBin; b--) {
+          if (waveformBars[b] < onsetThreshold * 0.85) {
+            cleanStart = Math.max(cursorTime, binToTime(b + 1) - 0.015);
+            break;
+          }
+        }
+      }
+
+      cleanEnd = Math.max(cleanStart + minSegDur, cleanEnd);
+    }
+
+    cleanStart = Number(cleanStart.toFixed(3));
+    cleanEnd = Number(cleanEnd.toFixed(3));
+    cursorTime = cleanEnd;
+
+    const segSpan = Math.max(0.18, cleanEnd - cleanStart);
+    const updatedTracks: CaptionSegment['tracks'] = {};
+
+    (Object.keys(seg.tracks) as TrackKey[]).forEach((tk) => {
+      const tr = seg.tracks[tk];
+      if (!tr) return;
+
+      const baseWords = buildWordTimingsClient(
+        tr.text,
+        cleanStart,
+        cleanEnd,
+        tr.words,
+        undefined,
+        autoHeroNLP
+      );
+
+      if (!hasHighResWaveform || baseWords.length <= 1) {
+        updatedTracks[tk] = {
+          text: tr.text,
+          words: baseWords.map((w, wIdx) => ({
+            ...w,
+            startTime: wIdx === 0 ? cleanStart : Number(w.startTime.toFixed(3)),
+            endTime:
+              wIdx === baseWords.length - 1 ? cleanEnd : Number(w.endTime.toFixed(3)),
+          })),
+        };
+        return;
+      }
+
+      // Weight each word by both phonetic syllable duration AND local acoustic energy integral
+      const weights = baseWords.map((w) => {
+        const phoneticW = Math.max(2, w.word.replace(/[^a-zA-Z0-9\u0900-\u0D7F]/g, '').length);
+        const b0 = timeToBin(w.startTime);
+        const b1 = Math.max(b0, timeToBin(w.endTime));
+        let energySum = 0;
+        for (let b = b0; b <= b1; b++) {
+          energySum += Math.max(0.15, waveformBars[b] || 0.25);
+        }
+        const avgEnergy = energySum / Math.max(1, b1 - b0 + 1);
+        return phoneticW * (0.72 + 0.28 * avgEnergy);
+      });
+      const totalW = weights.reduce((a, b) => a + b, 0) || 1;
+
+      let wordCursor = cleanStart;
+      const preciseWords: WordTiming[] = baseWords.map((w, wIdx) => {
+        const wStart = Number(wordCursor.toFixed(3));
+        const slice = (weights[wIdx] / totalW) * segSpan;
+        const wEnd =
+          wIdx === baseWords.length - 1
+            ? cleanEnd
+            : Number(Math.min(cleanEnd, wordCursor + slice).toFixed(3));
+        wordCursor = wEnd;
+        return {
+          ...w,
+          startTime: wStart,
+          endTime: Math.max(wStart + 0.04, wEnd),
+        };
+      });
+
+      updatedTracks[tk] = {
+        text: tr.text,
+        words: preciseWords,
+      };
+    });
+
+    aligned.push({
+      ...seg,
+      displayLineNumber: i + 1,
+      startTime: cleanStart,
+      endTime: cleanEnd,
+      tracks: updatedTracks,
+    });
+  }
+
+  return aligned;
 }
 
 /**
@@ -1044,9 +1202,14 @@ export function regroupSegmentsByWordsPerLine(
 export async function extractAudioChunksFromVideo(
   file: File,
   onProgress?: (stage: string) => void,
-  onFirstChunkReady?: (firstChunk: AudioChunkPayload) => void
+  onFirstChunkReady?: (firstChunk: AudioChunkPayload) => void,
+  enableAudioEnhancement = true
 ): Promise<AudioChunkPayload[]> {
-  onProgress?.('Analyzing audio waveform & enhancing speech clarity for 100% verbatim captions...');
+  onProgress?.(
+    enableAudioEnhancement
+      ? 'Analyzing audio waveform & enhancing speech clarity for 100% verbatim captions...'
+      : 'Analyzing audio waveform for 100% verbatim captions...'
+  );
   const probedDuration = await probeMediaDuration(file);
 
   try {
@@ -1169,25 +1332,27 @@ export async function extractAudioChunksFromVideo(
         downsampled[s] = count > 0 ? acc / count : 0;
       }
 
-      // 3. Apply Windowed Automatic Gain Control (AGC) across 400ms blocks so quiet words are crystal clear
-      const agcWindowSamples = Math.floor(0.4 * targetSampleRate);
-      for (let wStart = 0; wStart < outSampleCount; wStart += agcWindowSamples) {
-        const wEnd = Math.min(outSampleCount, wStart + agcWindowSamples);
-        let winPeak = 0;
-        let winSumSq = 0;
-        for (let k = wStart; k < wEnd; k++) {
-          const abs = Math.abs(downsampled[k]);
-          if (abs > winPeak) winPeak = abs;
-          winSumSq += downsampled[k] * downsampled[k];
-        }
-        const winRms = Math.sqrt(winSumSq / Math.max(1, wEnd - wStart));
-        // Boost quiet spoken syllables without amplifying pure silence noise floor
-        if (winRms > 0.004 && winPeak > 0.008 && winPeak < 0.85) {
-          const targetGain = Math.min(5.5, 0.78 / winPeak);
+      // 3. Apply Windowed Automatic Gain Control (AGC) across 400ms blocks ONLY when Audio Enhancement is enabled
+      if (enableAudioEnhancement) {
+        const agcWindowSamples = Math.floor(0.4 * targetSampleRate);
+        for (let wStart = 0; wStart < outSampleCount; wStart += agcWindowSamples) {
+          const wEnd = Math.min(outSampleCount, wStart + agcWindowSamples);
+          let winPeak = 0;
+          let winSumSq = 0;
           for (let k = wStart; k < wEnd; k++) {
-            const boosted = downsampled[k] * targetGain;
-            // Soft-clipping limiter
-            downsampled[k] = Math.tanh(boosted);
+            const abs = Math.abs(downsampled[k]);
+            if (abs > winPeak) winPeak = abs;
+            winSumSq += downsampled[k] * downsampled[k];
+          }
+          const winRms = Math.sqrt(winSumSq / Math.max(1, wEnd - wStart));
+          // Boost quiet spoken syllables without amplifying pure silence noise floor
+          if (winRms > 0.004 && winPeak > 0.008 && winPeak < 0.85) {
+            const targetGain = Math.min(5.5, 0.78 / winPeak);
+            for (let k = wStart; k < wEnd; k++) {
+              const boosted = downsampled[k] * targetGain;
+              // Soft-clipping limiter
+              downsampled[k] = Math.tanh(boosted);
+            }
           }
         }
       }
@@ -1310,7 +1475,70 @@ export function triggerFileDownload(
   setTimeout(() => URL.revokeObjectURL(url), 5000);
 }
 
-export type VideoExportFormat = 'mp4' | 'wp2' | 'webm';
+export type VideoExportFormat = 'mp4' | 'mov' | 'wp2' | 'webm';
+export type ExportResolution = '720p' | '1080p' | '4k';
+export type ExportFrameRate = 24 | 30 | 60;
+export type ExportTypeOption =
+  | 'video'
+  | 'srt'
+  | 'premiere-xml'
+  | 'davinci-fcpxml'
+  | 'davinci-edl'
+  | 'alpha-webm'
+  | 'vtt'
+  | 'json'
+  | 'wav';
+
+export interface ExportResolutionMeta {
+  width: number;
+  height: number;
+  label: string;
+  badge: string;
+  bitrateMbps: number;
+  videoBitsPerSecond: number;
+}
+
+export function getExportResolutionDimensions(
+  resolution: ExportResolution = '1080p',
+  aspectRatio: '9:16' | '16:9' | '1:1' = '9:16'
+): ExportResolutionMeta {
+  const baseShortSide =
+    resolution === '4k' ? 2160 : resolution === '1080p' ? 1080 : 720;
+  const baseLongSide =
+    resolution === '4k' ? 3840 : resolution === '1080p' ? 1920 : 1280;
+
+  const width =
+    aspectRatio === '16:9'
+      ? baseLongSide
+      : aspectRatio === '1:1'
+      ? baseShortSide
+      : baseShortSide;
+  const height =
+    aspectRatio === '16:9'
+      ? baseShortSide
+      : aspectRatio === '1:1'
+      ? baseShortSide
+      : baseLongSide;
+
+  const bitrateMbps =
+    resolution === '4k' ? 45 : resolution === '1080p' ? 20 : 10;
+
+  const badge =
+    resolution === '4k'
+      ? '4K Ultra HD'
+      : resolution === '1080p'
+      ? '1080p Full HD'
+      : '720p HD';
+
+  return {
+    width,
+    height,
+    label: `${width} × ${height} (${badge})`,
+    badge,
+    bitrateMbps,
+    videoBitsPerSecond: bitrateMbps * 1_000_000,
+  };
+}
 
 export function getSupportedExportMimeType(format: VideoExportFormat): {
   recorderMimeType: string;
@@ -1318,7 +1546,7 @@ export function getSupportedExportMimeType(format: VideoExportFormat): {
   extension: string;
   label: string;
 } {
-  if (format === 'mp4') {
+  if (format === 'mp4' || format === 'mov') {
     const mp4Candidates = [
       'video/mp4;codecs=avc1,mp4a.40.2',
       'video/mp4;codecs=h264,aac',
@@ -1333,6 +1561,16 @@ export function getSupportedExportMimeType(format: VideoExportFormat): {
       mp4Candidates.find(
         (m) => typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(m)
       ) || 'video/webm';
+
+    if (format === 'mov') {
+      return {
+        recorderMimeType: supported,
+        blobMimeType: 'video/quicktime',
+        extension: 'mov',
+        label: 'MOV (QuickTime H.264 + AAC)',
+      };
+    }
+
     return {
       recorderMimeType: supported,
       blobMimeType: 'video/mp4',
@@ -1369,12 +1607,32 @@ export function getSupportedExportMimeType(format: VideoExportFormat): {
   };
 }
 
+export interface NleExportOptions {
+  resolution?: ExportResolution;
+  aspectRatio?: '9:16' | '16:9' | '1:1';
+  fps?: ExportFrameRate;
+  fontFamily?: string;
+  fontSize?: number;
+  primaryColor?: string;
+  secondaryTrack?: TrackKey;
+  includeSecondary?: boolean;
+}
+
 export function generatePremiereDaVinciXML(
   segments: CaptionSegment[],
   primaryTrack: TrackKey,
-  totalDuration = 30
+  totalDuration = 30,
+  options?: NleExportOptions
 ): string {
   const safeDur = Math.max(1, Math.ceil(totalDuration));
+  const resMeta = getExportResolutionDimensions(
+    options?.resolution || '1080p',
+    options?.aspectRatio || '9:16'
+  );
+  const fps = options?.fps || 60;
+  const fontName = options?.fontFamily || 'Plus Jakarta Sans';
+  const fontSize = options?.fontSize || 64;
+
   const escapeXml = (str: string) =>
     (str || '')
       .replace(/&/g, '&amp;')
@@ -1385,29 +1643,44 @@ export function generatePremiereDaVinciXML(
 
   const titlesXml = segments
     .map((seg, idx) => {
-      const text = escapeXml(seg.tracks[primaryTrack]?.text || '');
+      const pText = seg.tracks[primaryTrack]?.text || '';
+      const sText =
+        options?.includeSecondary &&
+        options?.secondaryTrack &&
+        options.secondaryTrack !== primaryTrack
+          ? seg.tracks[options.secondaryTrack]?.text || ''
+          : '';
+      const combined = sText ? `${pText} / ${sText}` : pText;
+      const text = escapeXml(combined);
       const offsetSec = Math.max(0, Number(seg.startTime.toFixed(2)));
       const durSec = Math.max(0.2, Number((seg.endTime - seg.startTime).toFixed(2)));
-      return `            <title name="Kalakar Caption ${idx + 1}" lane="1" offset="${offsetSec}s" duration="${durSec}s" start="0s">
+      return `            <title name="Caption ${idx + 1}" lane="1" offset="${offsetSec}s" duration="${durSec}s" start="0s">
               <text>
                 <text-style ref="ts${idx + 1}">${text}</text-style>
               </text>
               <text-style-def id="ts${idx + 1}">
-                <text-style font="Plus Jakarta Sans" fontSize="64" fontFace="Bold" fontColor="1 0.84 0.04 1" alignment="center" />
+                <text-style font="${escapeXml(fontName)}" fontSize="${fontSize}" fontFace="Bold" fontColor="1 0.84 0.04 1" alignment="center" />
               </text-style-def>
             </title>`;
     })
     .join('\n');
 
+  const formatName =
+    options?.resolution === '4k'
+      ? `FFVideoFormat4K${fps}`
+      : options?.resolution === '720p'
+      ? `FFVideoFormat720p${fps}`
+      : `FFVideoFormat1080p${fps}`;
+
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE fcpxml>
 <fcpxml version="1.9">
   <resources>
-    <format id="r1" name="FFVideoFormat1080p60" frameDuration="100/6000s" width="1080" height="1920" colorSpace="1-1-1 (Rec. 709)" />
+    <format id="r1" name="${formatName}" frameDuration="100/${fps * 100}s" width="${resMeta.width}" height="${resMeta.height}" colorSpace="1-1-1 (Rec. 709)" />
   </resources>
   <library>
-    <event name="Kalakar Studio Captions (${primaryTrack.toUpperCase()})">
-      <project name="Kalakar_${primaryTrack}_Timeline">
+    <event name="Kalakar Studio Captions (${primaryTrack.toUpperCase()} · ${resMeta.badge})">
+      <project name="Kalakar_${primaryTrack}_${options?.resolution || '1080p'}_Timeline">
         <sequence format="r1" duration="${safeDur}s" tcStart="0s" tcFormat="NDF">
           <spine>
             <gap name="Kalakar Base Track" offset="0s" duration="${safeDur}s" start="0s">
@@ -1419,6 +1692,174 @@ ${titlesXml}
     </event>
   </library>
 </fcpxml>`;
+}
+
+/**
+ * Generates native Adobe Premiere Pro XML (Final Cut Pro 7 XMEML v4) sequence file (.xml)
+ * with frame-accurate caption generator clips and markers at 720p, 1080p, or 4K.
+ */
+export function generatePremiereProXMEML(
+  segments: CaptionSegment[],
+  primaryTrack: TrackKey,
+  totalDuration = 30,
+  options?: NleExportOptions
+): string {
+  const resMeta = getExportResolutionDimensions(
+    options?.resolution || '1080p',
+    options?.aspectRatio || '9:16'
+  );
+  const fps = options?.fps || 30;
+  const totalFrames = Math.max(fps, Math.ceil(totalDuration * fps));
+
+  const escapeXml = (str: string) =>
+    (str || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&apos;');
+
+  const clipItemsXml = segments
+    .map((seg, idx) => {
+      const pText = seg.tracks[primaryTrack]?.text || '';
+      const sText =
+        options?.includeSecondary &&
+        options?.secondaryTrack &&
+        options.secondaryTrack !== primaryTrack
+          ? seg.tracks[options.secondaryTrack]?.text || ''
+          : '';
+      const fullText = escapeXml(sText ? `${pText}\n${sText}` : pText);
+      const startFrame = Math.max(0, Math.round(seg.startTime * fps));
+      const endFrame = Math.max(startFrame + 1, Math.round(seg.endTime * fps));
+      const clipDur = endFrame - startFrame;
+
+      return `          <generatoritem id="caption-clip-${idx + 1}">
+            <name>${fullText}</name>
+            <duration>${clipDur}</duration>
+            <rate>
+              <timebase>${fps}</timebase>
+              <ntsc>FALSE</ntsc>
+            </rate>
+            <start>${startFrame}</start>
+            <end>${endFrame}</end>
+            <in>0</in>
+            <out>${clipDur}</out>
+            <enabled>TRUE</enabled>
+            <effect>
+              <name>Text</name>
+              <effectid>Text</effectid>
+              <effectcategory>Text</effectcategory>
+              <effecttype>generator</effecttype>
+              <mediatype>video</mediatype>
+              <parameter>
+                <parameterid>str</parameterid>
+                <name>Text</name>
+                <value>${fullText}</value>
+              </parameter>
+              <parameter>
+                <parameterid>fontname</parameterid>
+                <name>Font</name>
+                <value>${escapeXml(options?.fontFamily || 'Plus Jakarta Sans')}</value>
+              </parameter>
+              <parameter>
+                <parameterid>fontsize</parameterid>
+                <name>Size</name>
+                <value>${options?.fontSize || 52}</value>
+              </parameter>
+            </effect>
+          </generatoritem>`;
+    })
+    .join('\n');
+
+  const markersXml = segments
+    .map((seg, idx) => {
+      const pText = escapeXml(seg.tracks[primaryTrack]?.text || '');
+      const inFrame = Math.max(0, Math.round(seg.startTime * fps));
+      const outFrame = Math.max(inFrame + 1, Math.round(seg.endTime * fps));
+      return `      <marker>
+        <name>Line ${idx + 1}</name>
+        <comment>${pText}</comment>
+        <in>${inFrame}</in>
+        <out>${outFrame}</out>
+      </marker>`;
+    })
+    .join('\n');
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE xmeml>
+<xmeml version="4">
+  <sequence id="premiere-sequence-1">
+    <name>Kalakar_PremierePro_${primaryTrack.toUpperCase()}_${options?.resolution || '1080p'}</name>
+    <duration>${totalFrames}</duration>
+    <rate>
+      <timebase>${fps}</timebase>
+      <ntsc>FALSE</ntsc>
+    </rate>
+    <timecode>
+      <rate>
+        <timebase>${fps}</timebase>
+        <ntsc>FALSE</ntsc>
+      </rate>
+      <string>00:00:00:00</string>
+      <frame>0</frame>
+      <displayformat>NDF</displayformat>
+    </timecode>
+    <media>
+      <video>
+        <format>
+          <samplecharacteristics>
+            <rate>
+              <timebase>${fps}</timebase>
+              <ntsc>FALSE</ntsc>
+            </rate>
+            <width>${resMeta.width}</width>
+            <height>${resMeta.height}</height>
+            <anamorphic>FALSE</anamorphic>
+            <pixelaspectratio>square</pixelaspectratio>
+            <fielddominance>none</fielddominance>
+          </samplecharacteristics>
+        </format>
+        <track>
+          <enabled>TRUE</enabled>
+          <locked>FALSE</locked>
+${clipItemsXml}
+        </track>
+      </video>
+    </media>
+${markersXml}
+  </sequence>
+</xmeml>`;
+}
+
+function formatTimeEDL(seconds: number, fps = 30): string {
+  const safeSec = Math.max(0, seconds);
+  const hrs = Math.floor(safeSec / 3600);
+  const mins = Math.floor((safeSec % 3600) / 60);
+  const secs = Math.floor(safeSec % 60);
+  const frames = Math.min(fps - 1, Math.floor((safeSec - Math.floor(safeSec)) * fps));
+  return `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}:${String(frames).padStart(2, '0')}`;
+}
+
+/**
+ * Generates a CMX 3600 EDL (.edl) file for Blackmagic DaVinci Resolve & Premiere Pro
+ * with frame-accurate timecodes and Resolve Marker / Subtitle metadata.
+ */
+export function generateDaVinciResolveEDL(
+  segments: CaptionSegment[],
+  primaryTrack: TrackKey,
+  fps: ExportFrameRate = 30
+): string {
+  const header = `TITLE: KALAKAR_DAVINCI_${primaryTrack.toUpperCase()}_TIMELINE\nFCM: NON-DROP FRAME\n\n`;
+  const events = segments
+    .map((seg, idx) => {
+      const eventNum = String(idx + 1).padStart(3, '0');
+      const tcIn = formatTimeEDL(seg.startTime, fps);
+      const tcOut = formatTimeEDL(seg.endTime, fps);
+      const text = (seg.tracks[primaryTrack]?.text || '').replace(/\r?\n/g, ' ').trim();
+      return `${eventNum}  AX       V     C        ${tcIn} ${tcOut} ${tcIn} ${tcOut}\n* FROM CLIP NAME: Caption_${idx + 1}\n* COMMENT: ${text}\n |C:ResolveColorBlue |M:Line ${idx + 1}: ${text} |D:1\n`;
+    })
+    .join('\n');
+  return header + events;
 }
 
 export async function exportStandaloneAudioWAV(

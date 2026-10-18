@@ -1,11 +1,41 @@
-import { CaptionSegment, CaptionStyleConfig, SampleReel, WordTiming } from '../types/caption';
+import {
+  AIBRollSlot,
+  BRollDisplayLayout,
+  BRollMagicalEffect,
+  BRollMotionPreset,
+  CaptionSegment,
+  CaptionStyleConfig,
+  SampleReel,
+  VideoAspectRatio,
+  WordTiming,
+} from '../types/caption';
+import {
+  getCachedBRollImageElement,
+  synthesizeStudioBRollArtworkDataUrl,
+} from './aiBRollGenerator';
 import {
   renderForegroundSubjectCutoutLayer,
   updateVideoSubjectDepthMatte,
 } from './depthSubjectSegmentation';
+import {
+  isRomanTrack,
+  transliterateIndicToRoman,
+} from './indicRomanTransliterator';
+import {
+  stripEmojisFromText,
+  stripPunctuationFromText,
+} from '../data/kalakarOptionsData';
 
 let lastValidVideoFrameCanvas: HTMLCanvasElement | null = null;
 let lastValidVideoSrc = '';
+
+export function clearCachedVideoFrame() {
+  lastValidVideoFrameCanvas = null;
+  lastValidVideoSrc = '';
+}
+
+// Feature Flag: Behind-the-Head AI Cutout Module (Disabled for now per user request; preserved intact for future activation)
+export const BEHIND_THE_HEAD_MODULE_ENABLED = false;
 
 function hexToRgba(hex: string, alpha: number): string {
   const clean = (hex || '#000000').replace('#', '');
@@ -57,7 +87,32 @@ function applyCanvasLetterSpacing(ctx: CanvasRenderingContext2D, px: number | un
   }
 }
 
-function addMultiStopColors(grad: CanvasGradient, style: CaptionStyleConfig, shimmer = 0) {
+function addMultiStopColors(
+  grad: CanvasGradient,
+  style: CaptionStyleConfig,
+  shimmer = 0,
+  customStops?: { color: string; position: number }[]
+) {
+  const stopsToUse =
+    customStops && customStops.length >= 2
+      ? customStops
+      : style.gradientStops && style.gradientStops.length >= 2
+      ? style.gradientStops
+      : null;
+
+  if (stopsToUse) {
+    const sorted = [...stopsToUse].sort((a, b) => a.position - b.position);
+    sorted.forEach((s, idx) => {
+      const basePos = Math.max(0, Math.min(1, s.position / 100));
+      const shiftedPos =
+        idx === 0 || idx === sorted.length - 1
+          ? basePos
+          : Math.max(0.02, Math.min(0.98, basePos + shimmer * 0.4));
+      grad.addColorStop(shiftedPos, s.color || '#FFFFFF');
+    });
+    return;
+  }
+
   const c1 = style.gradientStart || '#FFFFFF';
   const c2 = style.gradientMid || '#FDE047';
   const c3 = style.gradientEnd || '#EAB308';
@@ -94,6 +149,19 @@ function createAnimatedWordGradient(
   const shift = Math.sin(phase * Math.PI) * (width * 0.35);
   const shimmer = 0.07 * Math.sin(currentTime * speed * 2.2);
 
+  const effectiveSpanW =
+    style.gradientLevel === 'char' ? Math.max(24, fontSize * 0.72) : width;
+
+  if (style.gradientAngle !== undefined || (style.gradientStops && style.gradientStops.length >= 2)) {
+    const cssAngle = style.gradientAngle ?? 90;
+    const rad = ((cssAngle - 90) * Math.PI) / 180;
+    const rx = (Math.cos(rad) * effectiveSpanW) / 2;
+    const ry = (Math.sin(rad) * fontSize) / 2;
+    const grad = ctx.createLinearGradient(-rx + shift * 0.3, -ry, rx + shift * 0.3, ry);
+    addMultiStopColors(grad, style, shimmer);
+    return grad;
+  }
+
   const dir = style.gradientDirection || 'vertical';
   if (dir === 'vertical') {
     const grad = ctx.createLinearGradient(0, -fontSize * 0.54, 0, fontSize * 0.5);
@@ -101,19 +169,24 @@ function createAnimatedWordGradient(
     return grad;
   }
   if (dir === 'radial') {
-    const r = Math.max(20, Math.max(width, fontSize) * 0.65);
+    const r = Math.max(20, Math.max(effectiveSpanW, fontSize) * 0.65);
     const grad = ctx.createRadialGradient(shift * 0.2, 0, 2, 0, 0, r);
     addMultiStopColors(grad, style, shimmer);
     return grad;
   }
   if (dir === 'horizontal') {
-    const grad = ctx.createLinearGradient(-width / 2 + shift, 0, width / 2 + shift, 0);
+    const grad = ctx.createLinearGradient(
+      -effectiveSpanW / 2 + shift,
+      0,
+      effectiveSpanW / 2 + shift,
+      0
+    );
     addMultiStopColors(grad, style, shimmer);
     return grad;
   }
 
   const angleRad = ((style.gradientAngle ?? 45) * Math.PI) / 180;
-  const rx = (Math.cos(angleRad) * width) / 2;
+  const rx = (Math.cos(angleRad) * effectiveSpanW) / 2;
   const ry = (Math.sin(angleRad) * fontSize) / 2;
   const grad = ctx.createLinearGradient(-rx + shift, -ry, rx + shift, ry);
   addMultiStopColors(grad, style, shimmer);
@@ -121,8 +194,7 @@ function createAnimatedWordGradient(
 }
 
 /**
- * Creates the signature SIDZ vertical top-to-bottom (or user-selected direction) luminous gradient
- * with 3-stop or 4-stop support and 60fps light shimmer.
+ * Creates the signature SIDZ / Merupify luminous multi-stop gradient (supports up to 5 stops, custom Angle 0-360°, and Word/Char level).
  */
 function createSidzVerticalGradient(
   ctx: CanvasRenderingContext2D,
@@ -136,17 +208,35 @@ function createSidzVerticalGradient(
   }
   const speed = style.gradientSpeed || 1.5;
   const shimmer = 0.08 * Math.sin(currentTime * speed * 2.4);
+  const spanWidth =
+    style.gradientLevel === 'char' ? Math.max(28, fontSize * 0.72) : Math.max(60, textWidth);
+
+  if (style.gradientAngle !== undefined || (style.gradientStops && style.gradientStops.length >= 2)) {
+    const cssAngle = style.gradientAngle ?? 90;
+    const rad = ((cssAngle - 90) * Math.PI) / 180;
+    const halfW = spanWidth * 0.5;
+    const halfH = fontSize * 0.54;
+    const grad = ctx.createLinearGradient(
+      -Math.cos(rad) * halfW,
+      -Math.sin(rad) * halfH,
+      Math.cos(rad) * halfW,
+      Math.sin(rad) * halfH
+    );
+    addMultiStopColors(grad, style, shimmer);
+    return grad;
+  }
+
   const dir = style.gradientDirection || 'vertical';
 
   if (dir === 'horizontal') {
-    const halfW = Math.max(60, textWidth * 0.5);
+    const halfW = spanWidth * 0.5;
     const grad = ctx.createLinearGradient(-halfW, 0, halfW, 0);
     addMultiStopColors(grad, style, shimmer);
     return grad;
   }
   if (dir === 'diagonal') {
     const angleRad = ((style.gradientAngle ?? 135) * Math.PI) / 180;
-    const halfW = Math.max(60, textWidth * 0.45);
+    const halfW = spanWidth * 0.45;
     const halfH = fontSize * 0.52;
     const grad = ctx.createLinearGradient(
       -Math.cos(angleRad) * halfW,
@@ -158,7 +248,7 @@ function createSidzVerticalGradient(
     return grad;
   }
   if (dir === 'radial') {
-    const r = Math.max(40, Math.max(textWidth * 0.5, fontSize * 0.7));
+    const r = Math.max(40, Math.max(spanWidth * 0.5, fontSize * 0.7));
     const grad = ctx.createRadialGradient(0, -fontSize * 0.1, 4, 0, 0, r);
     addMultiStopColors(grad, style, shimmer);
     return grad;
@@ -168,6 +258,48 @@ function createSidzVerticalGradient(
   const botY = fontSize * 0.5;
   const grad = ctx.createLinearGradient(0, topY, 0, botY);
   addMultiStopColors(grad, style, shimmer);
+  return grad;
+}
+
+/**
+ * Creates the Base Text fill style (either solid primaryColor OR multi-stop baseGradientStops when COLOR -> Gradient is active).
+ */
+function createBaseTextFill(
+  ctx: CanvasRenderingContext2D,
+  fontSize: number,
+  currentTime: number,
+  style: CaptionStyleConfig,
+  textWidth = 200
+): string | CanvasGradient {
+  if (!style.useBaseGradient) {
+    return style.primaryColor || '#FFFFFF';
+  }
+  const speed = style.gradientSpeed || 1.5;
+  const shimmer = 0.06 * Math.sin(currentTime * speed * 2.0);
+  const spanWidth =
+    style.baseGradientLevel === 'char'
+      ? Math.max(26, fontSize * 0.72)
+      : Math.max(60, textWidth);
+  const cssAngle = style.baseGradientAngle ?? 90;
+  const rad = ((cssAngle - 90) * Math.PI) / 180;
+  const halfW = spanWidth * 0.5;
+  const halfH = fontSize * 0.54;
+  const grad = ctx.createLinearGradient(
+    -Math.cos(rad) * halfW,
+    -Math.sin(rad) * halfH,
+    Math.cos(rad) * halfW,
+    Math.sin(rad) * halfH
+  );
+  const baseStops =
+    style.baseGradientStops && style.baseGradientStops.length >= 2
+      ? style.baseGradientStops
+      : [
+          { id: 'b1', color: '#9A6515', position: 0 },
+          { id: 'b2', color: '#DFB249', position: 42 },
+          { id: 'b3', color: '#FFF6C3', position: 52 },
+          { id: 'b4', color: '#8C5811', position: 100 },
+        ];
+  addMultiStopColors(grad, style, shimmer, baseStops);
   return grad;
 }
 
@@ -495,16 +627,222 @@ function clampHorizontalCenter(
   align: 'left' | 'center' | 'right',
   canvasWidth: number
 ): number {
-  const margin = canvasWidth * 0.04;
+  // Allow full horizontal placement across the screen while keeping at least 15% of text visible on screen
+  const minEdge = -textWidth * 0.35;
+  const maxEdge = canvasWidth + textWidth * 0.35;
   if (align === 'center') {
-    const half = textWidth / 2;
-    return Math.max(margin + half, Math.min(canvasWidth - margin - half, desiredX));
+    return Math.max(canvasWidth * 0.03, Math.min(canvasWidth * 0.97, desiredX));
   }
   if (align === 'left') {
-    return Math.max(margin, Math.min(canvasWidth - margin - textWidth, desiredX));
+    return Math.max(minEdge, Math.min(canvasWidth * 0.95, desiredX));
   }
-  // align === 'right'
-  return Math.max(margin + textWidth, Math.min(canvasWidth - margin, desiredX));
+  return Math.max(canvasWidth * 0.05, Math.min(maxEdge, desiredX));
+}
+
+interface TransitionTransformResult {
+  dx: number;
+  dy: number;
+  scaleX: number;
+  scaleY: number;
+  rotationRad: number;
+  alpha: number;
+}
+
+/**
+ * Computes live Entrance (IN), Hold (HOLD), and Exit (OUT) animation transforms
+ * so any selected transition from the Transitions tab animates every template on screen.
+ */
+function computeTransitionTransform(
+  currentTime: number,
+  segStart: number,
+  segEnd: number,
+  style: CaptionStyleConfig
+): TransitionTransformResult {
+  const speed = Math.max(0.4, style.animationSpeed || 1);
+  const segElapsed = Math.max(0, currentTime - segStart);
+  const segRemaining = Math.max(0, segEnd - currentTime);
+  const inDur = Math.min(0.38, Math.max(0.16, 0.28 / speed));
+  const outDur = Math.min(0.32, Math.max(0.14, 0.22 / speed));
+
+  let dx = 0;
+  let dy = 0;
+  let scaleX = 1;
+  let scaleY = 1;
+  let rotationRad = 0;
+  let alpha = 1;
+
+  const transIn = style.transitionIn || 'None';
+  if (transIn !== 'None' && segElapsed < inDur) {
+    const p = Math.max(0, Math.min(1, segElapsed / inDur));
+    const easeOut = 1 - Math.pow(1 - p, 3);
+    const inv = 1 - easeOut;
+    switch (transIn) {
+      case 'Slide Up':
+        dy += inv * 46;
+        alpha *= easeOut;
+        break;
+      case 'Slide Down':
+        dy -= inv * 46;
+        alpha *= easeOut;
+        break;
+      case 'Slide Left':
+        dx += inv * 68;
+        alpha *= easeOut;
+        break;
+      case 'Slide Right':
+        dx -= inv * 68;
+        alpha *= easeOut;
+        break;
+      case 'Fade':
+      case 'Blur':
+        alpha *= easeOut;
+        break;
+      case 'Pop':
+      case 'Zoom':
+      case 'Scale': {
+        const s = 0.65 + 0.35 * easeOut + 0.08 * Math.sin(p * Math.PI);
+        scaleX *= s;
+        scaleY *= s;
+        alpha *= Math.min(1, p * 2.2);
+        break;
+      }
+      case 'Punch': {
+        const slam = 1.45 - 0.45 * easeOut;
+        scaleX *= slam;
+        scaleY *= slam;
+        alpha *= Math.min(1, p * 2.5);
+        break;
+      }
+      case 'Stretch':
+        scaleX *= 0.55 + 0.45 * easeOut;
+        scaleY *= 1.35 - 0.35 * easeOut;
+        alpha *= easeOut;
+        break;
+      case 'Spin':
+        rotationRad += inv * -0.45;
+        scaleX *= 0.7 + 0.3 * easeOut;
+        scaleY *= 0.7 + 0.3 * easeOut;
+        alpha *= easeOut;
+        break;
+      case 'Flip':
+        scaleY *= Math.max(0.1, easeOut);
+        alpha *= easeOut;
+        break;
+      case 'Wobble':
+        rotationRad += Math.sin(p * Math.PI * 3) * 0.14 * inv;
+        break;
+      case 'Glitch':
+        dx += (Math.sin(segElapsed * 90) > 0 ? 1 : -1) * inv * 14;
+        break;
+      case 'Flicker':
+        alpha *= Math.abs(Math.sin(p * Math.PI * 4)) * 0.5 + 0.5 * easeOut;
+        break;
+    }
+  }
+
+  const transHold = style.transitionHold || 'None';
+  if (transHold !== 'None') {
+    const t = currentTime * speed;
+    switch (transHold) {
+      case 'Float':
+        dy += Math.sin(t * 3.2) * 6;
+        break;
+      case 'Pulse': {
+        const pulse = 1 + Math.sin(t * 5.5) * 0.045;
+        scaleX *= pulse;
+        scaleY *= pulse;
+        break;
+      }
+      case 'Breathe': {
+        const br = 1 + Math.sin(t * 2.6) * 0.03;
+        scaleX *= br;
+        scaleY *= br;
+        break;
+      }
+      case 'Shake':
+        dx += Math.sin(t * 22) * 3.5;
+        dy += Math.cos(t * 19) * 2.5;
+        break;
+      case 'Wave':
+        dy += Math.sin(t * 4.5) * 7;
+        rotationRad += Math.cos(t * 4.5) * 0.025;
+        break;
+      case 'Swing':
+        rotationRad += Math.sin(t * 3.6) * 0.045;
+        break;
+      case 'Flicker':
+        alpha *= 0.82 + 0.18 * Math.sin(t * 18);
+        break;
+      case 'Jitter':
+        dx += Math.sin(t * 34) * 2.2;
+        rotationRad += Math.cos(t * 28) * 0.018;
+        break;
+    }
+  }
+
+  const transOut = style.transitionOut || 'None';
+  if (transOut !== 'None' && segRemaining < outDur) {
+    const p = Math.max(0, Math.min(1, 1 - segRemaining / outDur));
+    const easeIn = p * p;
+    switch (transOut) {
+      case 'Slide Up':
+        dy -= easeIn * 44;
+        alpha *= 1 - easeIn;
+        break;
+      case 'Slide Down':
+        dy += easeIn * 44;
+        alpha *= 1 - easeIn;
+        break;
+      case 'Slide Left':
+        dx -= easeIn * 64;
+        alpha *= 1 - easeIn;
+        break;
+      case 'Slide Right':
+        dx += easeIn * 64;
+        alpha *= 1 - easeIn;
+        break;
+      case 'Fade':
+      case 'Blur':
+        alpha *= 1 - easeIn;
+        break;
+      case 'Pop':
+      case 'Zoom':
+      case 'Scale':
+      case 'Punch': {
+        const s = Math.max(0.2, 1 - easeIn * 0.45);
+        scaleX *= s;
+        scaleY *= s;
+        alpha *= 1 - easeIn;
+        break;
+      }
+      case 'Stretch':
+        scaleX *= 1 + easeIn * 0.45;
+        scaleY *= Math.max(0.15, 1 - easeIn * 0.65);
+        alpha *= 1 - easeIn;
+        break;
+      case 'Spin':
+        rotationRad += easeIn * 0.45;
+        alpha *= 1 - easeIn;
+        break;
+      case 'Flip':
+        scaleY *= Math.max(0.08, 1 - easeIn);
+        alpha *= 1 - easeIn;
+        break;
+      case 'Wobble':
+        rotationRad += Math.sin(p * Math.PI * 3) * 0.12;
+        alpha *= 1 - easeIn;
+        break;
+      case 'Glitch':
+        dx += (Math.sin(currentTime * 90) > 0 ? 1 : -1) * easeIn * 14;
+        alpha *= 1 - easeIn;
+        break;
+      case 'Flicker':
+        alpha *= (1 - easeIn) * (Math.abs(Math.sin(p * Math.PI * 4)) * 0.6 + 0.4);
+        break;
+    }
+  }
+
+  return { dx, dy, scaleX, scaleY, rotationRad, alpha };
 }
 
 function drawInteractiveLayerBoundingBox(
@@ -563,6 +901,538 @@ function drawInteractiveLayerBoundingBox(
 }
 
 /**
+ * Renders the exact "Lala" (Paritosh Anand) Handwritten Caption Style:
+ * - Line 1 (Top): Smaller handwritten script ("Arey Maalik, mein houn") in deep petrol-teal ink (#1C434C)
+ * - Line 2 (Bottom Hero): Large bold handwritten script ("Paritosh Anand") in deep petrol-teal ink (#1C434C)
+ * - Hand-drawn multi-stroke red-orange marker underline swoosh (#EB4823) beneath the Hero phrase
+ * - Warm cream paper banner backdrop (#FAF6E8) with organic red-orange brush edge when backgroundOpacity > 0.05,
+ *   or crisp cream sticker outline when floating directly over raw video.
+ */
+/**
+ * Splits a CaptionSegment into Line 1 (First Line) and Line 2 (Second Line / Hero Line),
+ * honoring any explicit user overrides (`customLine1Text` / `customLine2Text`).
+ */
+export function splitSegmentIntoTwoLines(
+  seg: CaptionSegment,
+  trackKey: import('../types/caption').TrackKey
+): { line1Text: string; line2Text: string } {
+  const tr =
+    seg.tracks[trackKey] ||
+    seg.tracks.tinglish ||
+    seg.tracks.english ||
+    Object.values(seg.tracks)[0];
+  const words = tr?.words || [];
+  const enforceRoman = isRomanTrack(trackKey);
+
+  if (seg.customLine1Text !== undefined || seg.customLine2Text !== undefined) {
+    const rawL1 = seg.customLine1Text ?? '';
+    const rawL2 = seg.customLine2Text ?? '';
+    return {
+      line1Text: enforceRoman ? transliterateIndicToRoman(rawL1) : rawL1,
+      line2Text: enforceRoman ? transliterateIndicToRoman(rawL2) : rawL2,
+    };
+  }
+
+  if (words.length === 0) {
+    const fallbackTxt = tr?.text || '';
+    return {
+      line1Text: '',
+      line2Text: enforceRoman ? transliterateIndicToRoman(fallbackTxt) : fallbackTxt,
+    };
+  }
+
+  const cleanWords = words.map((w) => ({
+    ...w,
+    word: enforceRoman ? transliterateIndicToRoman(w.word) : w.word,
+  }));
+
+  if (cleanWords.length === 1) {
+    return { line1Text: '', line2Text: cleanWords[0].word };
+  }
+
+  const heroIndices: number[] = [];
+  cleanWords.forEach((w, idx) => {
+    if (w.isHero) heroIndices.push(idx);
+  });
+
+  if (heroIndices.length > 0) {
+    const firstHero = heroIndices[0];
+    const lastHero = heroIndices[heroIndices.length - 1];
+    if (firstHero > 0) {
+      const candidateTop = cleanWords.slice(0, firstHero).map((w) => w.word);
+      const candidateBottom = cleanWords.slice(firstHero).map((w) => w.word);
+      if (
+        cleanWords.length >= 3 &&
+        candidateBottom.length === 1 &&
+        candidateBottom[0].replace(/[^a-zA-Z0-9]/g, '').length <= 2
+      ) {
+        const splitIdx = Math.max(1, Math.floor(cleanWords.length / 2));
+        return {
+          line1Text: cleanWords.slice(0, splitIdx).map((w) => w.word).join(' '),
+          line2Text: cleanWords.slice(splitIdx).map((w) => w.word).join(' '),
+        };
+      }
+      return {
+        line1Text: candidateTop.join(' '),
+        line2Text: candidateBottom.join(' '),
+      };
+    } else if (lastHero < cleanWords.length - 1) {
+      return {
+        line1Text: cleanWords.slice(0, lastHero + 1).map((w) => w.word).join(' '),
+        line2Text: cleanWords.slice(lastHero + 1).map((w) => w.word).join(' '),
+      };
+    }
+  }
+
+  const splitIdx = Math.max(1, Math.floor(cleanWords.length / 2));
+  return {
+    line1Text: cleanWords.slice(0, splitIdx).map((w) => w.word).join(' '),
+    line2Text: cleanWords.slice(splitIdx).map((w) => w.word).join(' '),
+  };
+}
+
+function renderLalaHandwrittenCaption(
+  ctx: CanvasRenderingContext2D,
+  canvasWidth: number,
+  canvasHeight: number,
+  currentTime: number,
+  segStart: number,
+  segEnd: number,
+  words: WordTiming[],
+  style: CaptionStyleConfig,
+  isExportRender = false,
+  customLine1Text?: string,
+  customLine2Text?: string
+) {
+  if (words.length === 0 && !customLine1Text && !customLine2Text) return;
+  ctx.save();
+
+  const segElapsed = Math.max(0, currentTime - segStart);
+  const segDuration = Math.max(0.3, segEnd - segStart);
+  const entranceProgress = Math.min(
+    1,
+    segElapsed / (0.22 / Math.max(0.5, style.animationSpeed || 1))
+  );
+  const swooshProgress = Math.min(
+    1,
+    Math.max(0.15, segElapsed / (0.34 / Math.max(0.5, style.animationSpeed || 1)))
+  );
+  const entranceSpring = 0.94 + 0.06 * Math.sin(entranceProgress * (Math.PI / 2));
+
+  // Partition words into Top Small Handwritten Line and Bottom Giant Handwritten Hero Line
+  let topWords: string[] = [];
+  let heroWords: string[] = [];
+
+  if (customLine1Text !== undefined || customLine2Text !== undefined) {
+    topWords = (customLine1Text ?? '').trim().split(/\s+/).filter(Boolean);
+    heroWords = (customLine2Text ?? '').trim().split(/\s+/).filter(Boolean);
+    if (heroWords.length === 0 && topWords.length > 0) {
+      heroWords = topWords;
+      topWords = [];
+    }
+  } else {
+    const heroIndices: number[] = [];
+    words.forEach((w, idx) => {
+      if (w.isHero) heroIndices.push(idx);
+    });
+
+    if (words.length === 1) {
+      topWords = [];
+      heroWords = [words[0].word];
+    } else if (heroIndices.length > 0) {
+      const firstHero = heroIndices[0];
+      const lastHero = heroIndices[heroIndices.length - 1];
+      if (firstHero > 0) {
+        const candidateTop = words.slice(0, firstHero).map((w) => w.word);
+        const candidateBottom = words.slice(firstHero).map((w) => w.word);
+        if (
+          words.length >= 3 &&
+          candidateBottom.length === 1 &&
+          candidateBottom[0].replace(/[^a-zA-Z0-9]/g, '').length <= 2
+        ) {
+          const splitIdx = Math.max(1, Math.floor(words.length / 2));
+          topWords = words.slice(0, splitIdx).map((w) => w.word);
+          heroWords = words.slice(splitIdx).map((w) => w.word);
+        } else {
+          topWords = candidateTop;
+          heroWords = candidateBottom;
+        }
+      } else if (lastHero < words.length - 1) {
+        topWords = words.slice(0, lastHero + 1).map((w) => w.word);
+        heroWords = words.slice(lastHero + 1).map((w) => w.word);
+      } else {
+        const splitIdx = Math.max(1, Math.floor(words.length / 2));
+        topWords = words.slice(0, splitIdx).map((w) => w.word);
+        heroWords = words.slice(splitIdx).map((w) => w.word);
+      }
+    } else {
+      const splitIdx = Math.max(1, Math.floor(words.length / 2));
+      topWords = words.slice(0, splitIdx).map((w) => w.word);
+      heroWords = words.slice(splitIdx).map((w) => w.word);
+    }
+  }
+
+  const baseCenterX = ((style.positionX ?? 50) / 100) * canvasWidth;
+  const baseCenterY = ((style.positionY ?? 68) / 100) * canvasHeight;
+  const vertGap = Number(style.verticalSpacing ?? 0);
+  const letterSpace = Number(style.letterSpacing ?? 0);
+
+  const aspectFontScale =
+    canvasHeight <= 760 ? (canvasWidth > canvasHeight ? 0.85 : 0.9) : 1.0;
+  const effectiveBaseFontSize = Math.round((style.fontSize || 48) * aspectFontScale);
+
+  const smallFontSize = Math.max(
+    22,
+    style.line1FontSizePx
+      ? Math.round(style.line1FontSizePx * aspectFontScale)
+      : Math.round(effectiveBaseFontSize * (style.smallWordScale || 0.78))
+  );
+  const rawBigFontSize = Math.max(
+    36,
+    style.line2FontSizePx
+      ? Math.round(style.line2FontSizePx * aspectFontScale)
+      : Math.round(effectiveBaseFontSize * (style.bigWordScale || 1.95))
+  );
+
+  const trans = computeTransitionTransform(currentTime, segStart, segEnd, style);
+  const weight = style.fontWeight || 700;
+  const lalaFontFamily = style.fontFamily || 'Caveat';
+  const lalaHeroFontFamily =
+    style.heroWordFontFamily || style.fontFamily || 'Caveat';
+
+  const topText = transformWord(topWords.join(' '), style.textTransform || 'none');
+  const rawBottomText = transformWord(
+    heroWords.join(' '),
+    style.textTransform || 'none'
+  );
+
+  // Measure and fit Giant Bottom Line within 88% of canvas width
+  ctx.font = `${weight} ${rawBigFontSize}px ${getWordFontStack(lalaHeroFontFamily)}`;
+  applyCanvasLetterSpacing(ctx, letterSpace);
+  const measuredRawBigW = ctx.measureText(rawBottomText).width;
+  const maxAllowedW = canvasWidth * 0.88;
+  const fitRatio =
+    measuredRawBigW > maxAllowedW
+      ? Math.max(0.42, maxAllowedW / measuredRawBigW)
+      : 1;
+  const bigFontSize = Math.max(24, Math.round(rawBigFontSize * fitRatio));
+
+  ctx.font = `${weight} ${bigFontSize}px ${getWordFontStack(lalaHeroFontFamily)}`;
+  const bigTextWidth = Math.min(maxAllowedW, ctx.measureText(rawBottomText).width);
+
+  ctx.font = `${Math.max(500, weight - 100)} ${smallFontSize}px ${getWordFontStack(lalaFontFamily)}`;
+  const topTextWidth = topText
+    ? Math.min(maxAllowedW, ctx.measureText(topText).width)
+    : 0;
+
+  const small1OffsetX = ((style.smallOffsetX ?? 0) / 100) * canvasWidth;
+  const small1OffsetY = ((style.smallOffsetY ?? 0) / 100) * canvasHeight;
+  const bigOffsetX = ((style.bigOffsetX ?? 0) / 100) * canvasWidth;
+  const bigOffsetY = ((style.bigOffsetY ?? 0) / 100) * canvasHeight;
+
+  // Unrestricted Horizontal (X) and Vertical (Y) placement across the screen
+  const centerX = Math.max(
+    canvasWidth * 0.03,
+    Math.min(canvasWidth * 0.97, baseCenterX + bigOffsetX + trans.dx)
+  );
+  const centerY = Math.max(
+    canvasHeight * 0.04,
+    Math.min(canvasHeight * 0.96, baseCenterY + bigOffsetY + trans.dy)
+  );
+
+  // Honor user's chosen Primary Color, Highlight Color, and Background Color
+  const inkColor = style.primaryColor || '#1C434C';
+  const swooshColor = style.highlightColor || '#EB4823';
+  const paperColor = style.backgroundColor || '#FAF6E8';
+  const hasPaperCard =
+    style.backgroundEnabled !== false &&
+    (style.backgroundOpacity === undefined || style.backgroundOpacity > 0.05);
+
+  const smallAlign = style.smallTextAlign || style.bigTextAlign || 'center';
+  const bigAlign = style.bigTextAlign || 'center';
+
+  const contentWidth = Math.max(bigTextWidth, topTextWidth, 210);
+  const topY = topText
+    ? centerY - bigFontSize * 0.56 - smallFontSize * 0.35 - vertGap * 0.5 + small1OffsetY
+    : centerY;
+  const bigY = topText ? centerY + smallFontSize * 0.16 : centerY;
+  const swooshY = bigY + bigFontSize * 0.42;
+
+  ctx.globalAlpha = trans.alpha;
+
+  // Optional dynamic frame from Edit tab
+  drawCaptionDynamicFrame(
+    ctx,
+    centerX,
+    centerY,
+    contentWidth,
+    bigFontSize + smallFontSize + Math.abs(vertGap),
+    style
+  );
+
+  // 1. Warm Cream Paper Card with Brush Accent on Right (Customizable color, padding, radius & opacity)
+  if (hasPaperCard) {
+    ctx.save();
+    const userPad = style.backgroundPaddingPx ?? 0;
+    const padX = Math.max(28, bigFontSize * 0.55 + userPad);
+    const padTop = (topText ? Math.max(22, smallFontSize * 0.6) : 20) + userPad * 0.5;
+    const padBot = Math.max(26, bigFontSize * 0.5) + userPad * 0.5;
+    const cardW = Math.min(canvasWidth * 0.94, contentWidth + padX * 2);
+    const cardTop =
+      (topText ? topY - smallFontSize * 0.55 : bigY - bigFontSize * 0.55) -
+      padTop * 0.45;
+    const cardBot = swooshY + padBot * 0.65;
+    const cardH = Math.max(78, cardBot - cardTop);
+    const cardX = centerX - cardW / 2;
+    const cardRadius = style.backgroundRadiusPx ?? 20;
+
+    ctx.translate(centerX, cardTop + cardH / 2);
+    if (trans.rotationRad !== 0) ctx.rotate(trans.rotationRad);
+    ctx.scale(trans.scaleX, trans.scaleY);
+    ctx.translate(-centerX, -(cardTop + cardH / 2));
+
+    if (style.dropShadowEnabled ?? true) {
+      ctx.shadowColor = style.dropShadowColor || 'rgba(0, 0, 0, 0.52)';
+      ctx.shadowBlur = style.shadowBlur ?? 24;
+      ctx.shadowOffsetX = style.dropShadowX ?? 0;
+      ctx.shadowOffsetY = style.dropShadowY ?? 6;
+    }
+    ctx.fillStyle = hexToRgba(paperColor, style.backgroundOpacity ?? 0.96);
+    drawRoundedRect(ctx, cardX, cardTop, cardW, cardH, cardRadius);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+
+    // Subtle organic brush accent strip on the right edge of the paper card
+    ctx.save();
+    drawRoundedRect(ctx, cardX, cardTop, cardW, cardH, cardRadius);
+    ctx.clip();
+    ctx.fillStyle = swooshColor;
+    ctx.beginPath();
+    const accentLeft = cardX + cardW - Math.max(22, cardW * 0.075);
+    ctx.moveTo(accentLeft + 6, cardTop - 2);
+    ctx.lineTo(cardX + cardW + 4, cardTop - 2);
+    ctx.lineTo(cardX + cardW + 4, cardTop + cardH + 2);
+    ctx.lineTo(accentLeft + 10, cardTop + cardH + 2);
+    ctx.lineTo(accentLeft + 2, cardTop + cardH * 0.72);
+    ctx.lineTo(accentLeft + 8, cardTop + cardH * 0.45);
+    ctx.lineTo(accentLeft, cardTop + cardH * 0.22);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+
+    ctx.restore();
+  }
+
+  // 2. Render Top Line
+  if (topText) {
+    ctx.save();
+    const topAnchorX =
+      smallAlign === 'left'
+        ? centerX - contentWidth / 2 + topTextWidth / 2 + small1OffsetX
+        : smallAlign === 'right'
+        ? centerX + contentWidth / 2 - topTextWidth / 2 + small1OffsetX
+        : centerX + small1OffsetX;
+    ctx.translate(topAnchorX, topY);
+    if (trans.rotationRad !== 0) ctx.rotate(trans.rotationRad);
+    ctx.scale(entranceSpring * trans.scaleX, entranceSpring * trans.scaleY);
+    ctx.font = `${Math.max(500, weight - 100)} ${smallFontSize}px ${getWordFontStack(lalaFontFamily)}`;
+    applyCanvasLetterSpacing(ctx, letterSpace * 0.5);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    if (!hasPaperCard) {
+      ctx.lineJoin = 'round';
+      ctx.miterLimit = 2;
+      ctx.lineWidth = Math.max(4, style.strokeWidth || smallFontSize * 0.16);
+      ctx.strokeStyle = style.strokeWidth > 0 ? style.strokeColor : '#FAF6E8';
+      ctx.shadowColor = 'rgba(0, 0, 0, 0.75)';
+      ctx.shadowBlur = 12;
+      ctx.strokeText(topText, 0, 0);
+      ctx.shadowBlur = 0;
+    } else if (style.strokeWidth > 0) {
+      ctx.lineJoin = 'round';
+      ctx.lineWidth = style.strokeWidth;
+      ctx.strokeStyle = style.strokeColor || '#000000';
+      ctx.strokeText(topText, 0, 0);
+    }
+
+    if (style.glowEnabled) {
+      ctx.shadowColor = style.glowColor || swooshColor;
+      ctx.shadowBlur = style.glowSpread || 16;
+    }
+
+    ctx.fillStyle = style.useBaseGradient
+      ? createBaseTextFill(ctx, smallFontSize, currentTime, style, topTextWidth)
+      : inkColor;
+    ctx.fillText(topText, 0, 0);
+    ctx.restore();
+
+    const hitSmall: import('../types/caption').LayerHitBox = {
+      layer: 'small1',
+      x: topAnchorX - topTextWidth / 2,
+      y: topY - smallFontSize * 0.55,
+      width: Math.max(60, topTextWidth),
+      height: smallFontSize * 1.1,
+      handleX: topAnchorX + topTextWidth / 2,
+      handleY: topY + smallFontSize * 0.55,
+    };
+    latestRenderedLayerHitBoxes.push(hitSmall);
+  }
+
+  // 3. Render Bottom Giant Hero Line
+  const isHeroSpoken = words.some(
+    (w) => currentTime >= w.startTime && currentTime <= w.endTime + 0.1
+  );
+  const heroBounce = isHeroSpoken
+    ? 1.0 + 0.03 * Math.sin(((currentTime - segStart) / segDuration) * Math.PI * 2)
+    : 1.0;
+
+  const bigAnchorX =
+    bigAlign === 'left'
+      ? centerX - contentWidth / 2 + bigTextWidth / 2
+      : bigAlign === 'right'
+      ? centerX + contentWidth / 2 - bigTextWidth / 2
+      : centerX;
+
+  ctx.save();
+  ctx.translate(bigAnchorX, bigY);
+  if (trans.rotationRad !== 0) ctx.rotate(trans.rotationRad);
+  ctx.scale(
+    entranceSpring * heroBounce * trans.scaleX,
+    entranceSpring * heroBounce * trans.scaleY
+  );
+  ctx.font = `${weight} ${bigFontSize}px ${getWordFontStack(lalaHeroFontFamily)}`;
+  applyCanvasLetterSpacing(ctx, letterSpace);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  if (style.depth3DEnabled) {
+    const depthPx = Math.max(2, Math.min(20, style.depth3DDepth ?? 6));
+    const angleRad = ((style.depth3DAngle ?? 135) * Math.PI) / 180;
+    const dx3d = Math.cos(angleRad);
+    const dy3d = Math.sin(angleRad);
+    ctx.save();
+    ctx.fillStyle = style.depth3DColor || swooshColor;
+    for (let d = depthPx; d >= 1; d -= 1.5) {
+      ctx.fillText(rawBottomText, dx3d * d, dy3d * d);
+    }
+    ctx.restore();
+  }
+
+  if (!hasPaperCard) {
+    ctx.lineJoin = 'round';
+    ctx.miterLimit = 2;
+    ctx.lineWidth = Math.max(6, style.strokeWidth || bigFontSize * 0.15);
+    ctx.strokeStyle = style.strokeWidth > 0 ? style.strokeColor : '#FAF6E8';
+    ctx.shadowColor = 'rgba(0, 0, 0, 0.8)';
+    ctx.shadowBlur = 16;
+    ctx.strokeText(rawBottomText, 0, 0);
+    ctx.shadowBlur = 0;
+  } else if (style.strokeWidth > 0) {
+    ctx.lineJoin = 'round';
+    ctx.lineWidth = style.strokeWidth;
+    ctx.strokeStyle = style.strokeColor || '#000000';
+    ctx.strokeText(rawBottomText, 0, 0);
+  }
+
+  if (style.glowEnabled) {
+    ctx.shadowColor = style.glowColor || swooshColor;
+    ctx.shadowBlur = style.glowSpread || 18;
+  }
+
+  if (style.useGradient) {
+    ctx.fillStyle = createSidzVerticalGradient(
+      ctx,
+      bigFontSize,
+      currentTime,
+      style,
+      bigTextWidth
+    );
+  } else {
+    ctx.fillStyle =
+      style.emphasisMode === 'spotlight' ? swooshColor : inkColor;
+  }
+  ctx.fillText(rawBottomText, 0, 0);
+  ctx.restore();
+
+  // 4. Render Hand-Drawn Marker Underline Swoosh
+  if (style.underlineText !== false) {
+    ctx.save();
+    const swooshSpan = Math.max(90, bigTextWidth * 0.78) * swooshProgress;
+    const halfSpan = Math.max(45, bigTextWidth * 0.39);
+    const startX = bigAnchorX - halfSpan;
+    const endX = startX + swooshSpan;
+    const midX = (startX + endX) / 2;
+    const archLift = Math.max(5, bigFontSize * 0.11);
+
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.strokeStyle = swooshColor;
+
+    if (!hasPaperCard) {
+      ctx.shadowColor = 'rgba(0, 0, 0, 0.55)';
+      ctx.shadowBlur = 8;
+    }
+
+    // Stroke 1: Upper arched marker sweep
+    ctx.lineWidth = Math.max(3.2, bigFontSize * 0.068);
+    ctx.beginPath();
+    ctx.moveTo(startX + swooshSpan * 0.04, swooshY);
+    ctx.quadraticCurveTo(midX, swooshY - archLift, endX - swooshSpan * 0.02, swooshY - 1);
+    ctx.stroke();
+
+    // Stroke 2: Secondary slightly lower wider marker sweep
+    ctx.lineWidth = Math.max(2.6, bigFontSize * 0.055);
+    ctx.beginPath();
+    ctx.moveTo(startX, swooshY + Math.max(4, bigFontSize * 0.075));
+    ctx.quadraticCurveTo(
+      midX + swooshSpan * 0.03,
+      swooshY - archLift * 0.45,
+      endX + swooshSpan * 0.02,
+      swooshY + Math.max(2.5, bigFontSize * 0.05)
+    );
+    ctx.stroke();
+
+    // Stroke 3: Subtle third inner marker tail
+    ctx.globalAlpha = trans.alpha * 0.85;
+    ctx.lineWidth = Math.max(1.8, bigFontSize * 0.038);
+    ctx.beginPath();
+    ctx.moveTo(startX + swooshSpan * 0.16, swooshY + Math.max(6.5, bigFontSize * 0.11));
+    ctx.quadraticCurveTo(
+      midX + swooshSpan * 0.05,
+      swooshY + 1.5,
+      endX - swooshSpan * 0.08,
+      swooshY + Math.max(5, bigFontSize * 0.09)
+    );
+    ctx.stroke();
+
+    ctx.restore();
+  }
+
+  const hitBig: import('../types/caption').LayerHitBox = {
+    layer: 'big',
+    x: bigAnchorX - bigTextWidth / 2,
+    y: bigY - bigFontSize * 0.5,
+    width: Math.max(80, bigTextWidth),
+    height: bigFontSize * 1.15,
+    handleX: bigAnchorX + bigTextWidth / 2,
+    handleY: bigY + bigFontSize * 0.65,
+  };
+  latestRenderedLayerHitBoxes.push(hitBig);
+
+  if (!isExportRender && style.showOnScreenTransformBoxes) {
+    drawInteractiveLayerBoundingBox(
+      ctx,
+      hitBig,
+      style.selectedCanvasLayer === 'big',
+      `HERO · ${Math.round((style.bigWordScale || 1.95) * 100)}%`
+    );
+  }
+
+  ctx.restore();
+}
+
+/**
  * Renders the 4 signature SIDZ_<NAME> Composite Caption Layouts matching the user's reference screenshots,
  * upgraded with:
  * - Individual Small Line 1, Small Line 2, and Big Hero Text horizontal alignment (left / center / right)
@@ -579,9 +1449,11 @@ function renderSidzCompositeCaption(
   segEnd: number,
   words: WordTiming[],
   style: CaptionStyleConfig,
-  isExportRender = false
+  isExportRender = false,
+  customLine1Text?: string,
+  customLine2Text?: string
 ) {
-  if (words.length === 0) return;
+  if (words.length === 0 && !customLine1Text && !customLine2Text) return;
   ctx.save();
 
   const segElapsed = Math.max(0, currentTime - segStart);
@@ -595,7 +1467,7 @@ function renderSidzCompositeCaption(
     if (w.isHero) heroIndices.push(idx);
   });
 
-  if (heroIndices.length === 0) {
+  if (heroIndices.length === 0 && words.length > 0) {
     let bestIdx = words.length - 1;
     let maxLen = -1;
     words.forEach((w, idx) => {
@@ -607,85 +1479,61 @@ function renderSidzCompositeCaption(
     heroIndices.push(bestIdx);
   }
 
-  const firstHeroIdx = heroIndices[0];
-  const lastHeroIdx = heroIndices[heroIndices.length - 1];
+  const firstHeroIdx = heroIndices[0] ?? 0;
+  const lastHeroIdx = heroIndices[heroIndices.length - 1] ?? Math.max(0, words.length - 1);
 
-  let leadWords = words.slice(0, firstHeroIdx).map((w) => w.word);
-  let heroWords = words.slice(firstHeroIdx, lastHeroIdx + 1).map((w) => w.word);
-  let tailWords = words.slice(lastHeroIdx + 1).map((w) => w.word);
-
-  if (style.hierarchyMode === 'sidz-truly-flame') {
-    if (leadWords.length > 0 && tailWords.length === 0) {
-      const splitAt = Math.min(2, Math.max(1, Math.floor(words.length / 2)));
-      heroWords = words.slice(0, splitAt).map((w) => w.word);
-      tailWords = words.slice(splitAt).map((w) => w.word);
-      leadWords = [];
-    } else if (tailWords.length === 0 && heroWords.length > 1) {
-      tailWords = heroWords.slice(1);
-      heroWords = [heroWords[0]];
-    }
-  } else {
-    if (leadWords.length === 0 && tailWords.length > 0 && style.hierarchyMode !== 'sidz-20k-script') {
-      leadWords = heroWords;
-      heroWords = tailWords;
-      tailWords = [];
-    }
-  }
-
-  // Handle Small 2-Line Mode ('auto' | 'two-line-split' | 'single-line')
-  const twoLineMode = style.smallTwoLineMode || 'auto';
   let smallLine1Words: string[] = [];
   let smallLine2Words: string[] = [];
+  let heroWords: string[] = [];
 
-  if (twoLineMode === 'single-line') {
-    smallLine1Words = [...leadWords, ...tailWords];
+  if (customLine1Text !== undefined || customLine2Text !== undefined) {
+    smallLine1Words = (customLine1Text ?? '').trim().split(/\s+/).filter(Boolean);
     smallLine2Words = [];
-  } else if (twoLineMode === 'two-line-split') {
-    if (leadWords.length > 0 && tailWords.length > 0) {
-      smallLine1Words = leadWords;
-      smallLine2Words = tailWords;
-    } else {
-      const combinedSmall = [...leadWords, ...tailWords];
-      if (combinedSmall.length >= 2) {
-        const mid = Math.ceil(combinedSmall.length / 2);
-        smallLine1Words = combinedSmall.slice(0, mid);
-        smallLine2Words = combinedSmall.slice(mid);
-      } else if (combinedSmall.length === 1 && heroWords.length >= 2) {
-        smallLine1Words = combinedSmall;
-        smallLine2Words = [heroWords[0]];
-        heroWords = heroWords.slice(1);
-      } else {
-        smallLine1Words = combinedSmall;
-        smallLine2Words = [];
-      }
+    heroWords = (customLine2Text ?? '').trim().split(/\s+/).filter(Boolean);
+    if (heroWords.length === 0 && smallLine1Words.length > 0) {
+      heroWords = smallLine1Words;
+      smallLine1Words = [];
     }
   } else {
-    // 'auto' mode: split into 2 small lines if both lead and tail exist, or if leadWords has > 4 words
-    if (leadWords.length > 0 && tailWords.length > 0) {
-      smallLine1Words = leadWords;
-      smallLine2Words = tailWords;
-    } else if (leadWords.length >= 4) {
-      const mid = Math.ceil(leadWords.length / 2);
-      smallLine1Words = leadWords.slice(0, mid);
-      smallLine2Words = leadWords.slice(mid);
-    } else if (style.hierarchyMode === 'sidz-truly-flame' && tailWords.length > 0) {
-      if (tailWords.length >= 3) {
-        const mid = Math.ceil(tailWords.length / 2);
-        smallLine1Words = tailWords.slice(0, mid);
-        smallLine2Words = tailWords.slice(mid);
-      } else {
-        smallLine1Words = [];
-        smallLine2Words = tailWords;
+    let leadWords = words.slice(0, firstHeroIdx).map((w) => w.word);
+    heroWords = words.slice(firstHeroIdx, lastHeroIdx + 1).map((w) => w.word);
+    let tailWords = words.slice(lastHeroIdx + 1).map((w) => w.word);
+
+    if (style.hierarchyMode === 'sidz-truly-flame') {
+      if (leadWords.length > 0 && tailWords.length === 0) {
+        const splitAt = Math.min(2, Math.max(1, Math.floor(words.length / 2)));
+        heroWords = words.slice(0, splitAt).map((w) => w.word);
+        tailWords = words.slice(splitAt).map((w) => w.word);
+        leadWords = [];
+      } else if (tailWords.length === 0 && heroWords.length > 1) {
+        tailWords = heroWords.slice(1);
+        heroWords = [heroWords[0]];
       }
     } else {
-      smallLine1Words = leadWords;
-      smallLine2Words = tailWords;
+      if (leadWords.length === 0 && tailWords.length > 0 && style.hierarchyMode !== 'sidz-20k-script') {
+        leadWords = heroWords;
+        heroWords = tailWords;
+        tailWords = [];
+      }
+    }
+
+    // Default to clean 2-Line layout (Line 1 = all small words on a single crisp line, Line 2 = Hero words)
+    // Only split small words into 2 sub-lines if there are >= 5 small words AND two-line-split is explicitly requested
+    const twoLineMode = style.smallTwoLineMode || 'single-line';
+    const combinedSmall = [...leadWords, ...tailWords];
+    if (twoLineMode === 'two-line-split' && combinedSmall.length >= 5) {
+      const mid = Math.ceil(combinedSmall.length / 2);
+      smallLine1Words = combinedSmall.slice(0, mid);
+      smallLine2Words = combinedSmall.slice(mid);
+    } else {
+      smallLine1Words = combinedSmall;
+      smallLine2Words = [];
     }
   }
 
   const baseCenterX = ((style.positionX ?? 50) / 100) * canvasWidth;
   const baseCenterY = ((style.positionY ?? 66) / 100) * canvasHeight;
-  const vertGap = Number(style.verticalSpacing ?? 0);
+  const vertGap = Number(style.verticalSpacing ?? 8);
   const horizGap = Math.max(0, Number(style.horizontalSpacing ?? 14));
   const letterSpace = Number(style.letterSpacing ?? 0);
   const lineSpaceMult = Number(style.lineSpacing ?? 1.18);
@@ -695,18 +1543,25 @@ function renderSidzCompositeCaption(
   const effectiveBaseFontSize = Math.round(style.fontSize * aspectFontScale);
 
   const small1FontSize = Math.max(
-    13,
-    Math.round(effectiveBaseFontSize * (style.smallWordScale || 0.68))
+    24,
+    style.line1FontSizePx
+      ? Math.round(style.line1FontSizePx * aspectFontScale)
+      : Math.round(effectiveBaseFontSize * Math.max(0.68, style.smallWordScale || 0.76))
   );
   const small2FontSize = Math.max(
-    13,
-    Math.round(
-      effectiveBaseFontSize * (style.smallLine2Scale ?? style.smallWordScale ?? 0.68)
-    )
+    24,
+    style.line1FontSizePx
+      ? Math.round(style.line1FontSizePx * aspectFontScale)
+      : Math.round(
+          effectiveBaseFontSize *
+            Math.max(0.68, style.smallLine2Scale ?? style.smallWordScale ?? 0.76)
+        )
   );
   const rawGiantFontSize = Math.max(
-    26,
-    Math.round(effectiveBaseFontSize * (style.bigWordScale || 2.15))
+    36,
+    style.line2FontSizePx
+      ? Math.round(style.line2FontSizePx * aspectFontScale)
+      : Math.round(effectiveBaseFontSize * (style.bigWordScale || 1.95))
   );
 
   const isHeroCurrentlySpoken = words
@@ -731,7 +1586,7 @@ function renderSidzCompositeCaption(
     0.75,
     Math.min(1.65, (style.fontSize / 56) * ((style.bigWordScale || 2.15) / 2.15))
   );
-  const verticalStretch = (isTallCondensedMode ? 1.22 : 1.04) * (0.88 + 0.12 * userScaleBoost);
+  const verticalStretch = (isTallCondensedMode ? 1.16 : 1.04) * (0.88 + 0.12 * userScaleBoost);
 
   // Measure and fit Giant Hero Text within 90% of canvas width so it NEVER clips at screen edges
   ctx.font = `${style.fontWeight} ${rawGiantFontSize}px ${getWordFontStack(style.heroWordFontFamily)}`;
@@ -760,53 +1615,50 @@ function renderSidzCompositeCaption(
 
   // Determine default alignments per SIDZ preset, overridden by user's individual alignment settings
   const defaultSmall1Align: 'left' | 'center' | 'right' =
-    style.hierarchyMode === 'sidz-valuing-wide' ? 'center' : 'left';
+    style.hierarchyMode === 'sidz-valuing-wide' ? 'center' : 'center';
   const defaultSmall2Align: 'left' | 'center' | 'right' =
     style.hierarchyMode === 'sidz-truly-flame' || style.hierarchyMode === 'sidz-20k-script'
       ? 'right'
-      : style.hierarchyMode === 'sidz-valuing-wide'
-      ? 'center'
-      : 'left';
+      : 'center';
 
   const small1Align = style.smallTextAlign || defaultSmall1Align;
   const small2Align = style.smallLine2TextAlign || defaultSmall2Align;
   const bigAlign = style.bigTextAlign || 'center';
 
-  // Determine vertical stack order ('small1-small2-big' | 'small1-big-small2' | 'big-small1-small2')
   const defaultOrder =
     style.hierarchyMode === 'sidz-truly-flame'
       ? 'big-small1-small2'
-      : small2Text && !twoLineMode.includes('two-line')
-      ? 'small1-big-small2'
       : 'small1-small2-big';
   const lineOrder = style.lineOrderMode || defaultOrder;
 
-  // Compute baseline Y positions for each of the 3 layers before individual offsets
-  let baseSmall1Y = baseCenterY - giantVisualHeight * 0.56 - small1FontSize * 0.5 - vertGap;
-  let baseSmall2Y = baseCenterY + giantVisualHeight * 0.52 + small2FontSize * 0.45 + vertGap;
+  const cleanGap = Math.max(6, vertGap);
+
+  // Compute baseline Y positions for each of the layers with generous non-overlapping clearance!
+  let baseSmall1Y = baseCenterY - giantVisualHeight * 0.62 - small1FontSize * 0.65 - cleanGap;
+  let baseSmall2Y = baseCenterY + giantVisualHeight * 0.58 + small2FontSize * 0.55 + cleanGap;
   let baseBigY = baseCenterY;
 
   if (lineOrder === 'small1-small2-big') {
-    baseBigY = baseCenterY + (small1Text || small2Text ? small1FontSize * 0.45 : 0);
+    baseBigY = baseCenterY + (small1Text || small2Text ? small1FontSize * 0.48 : 0);
     if (small1Text && small2Text) {
-      baseSmall2Y = baseBigY - giantVisualHeight * 0.54 - small2FontSize * 0.5 - vertGap * 0.6;
+      baseSmall2Y = baseBigY - giantVisualHeight * 0.62 - small2FontSize * 0.65 - cleanGap * 0.6;
       baseSmall1Y =
-        baseSmall2Y - small2FontSize * lineSpaceMult - small1FontSize * 0.35 - vertGap * 0.4;
+        baseSmall2Y - small2FontSize * lineSpaceMult - small1FontSize * 0.45 - cleanGap * 0.4;
     } else {
-      baseSmall1Y = baseBigY - giantVisualHeight * 0.56 - small1FontSize * 0.5 - vertGap;
+      baseSmall1Y = baseBigY - giantVisualHeight * 0.62 - small1FontSize * 0.65 - cleanGap;
       baseSmall2Y = baseSmall1Y;
     }
   } else if (lineOrder === 'big-small1-small2') {
-    baseBigY = baseCenterY - giantVisualHeight * 0.22 - vertGap * 0.4;
-    baseSmall1Y = baseBigY + giantVisualHeight * 0.58 + small1FontSize * 0.5 + vertGap * 0.6;
+    baseBigY = baseCenterY - giantVisualHeight * 0.24 - cleanGap * 0.4;
+    baseSmall1Y = baseBigY + giantVisualHeight * 0.62 + small1FontSize * 0.62 + cleanGap * 0.6;
     baseSmall2Y = small1Text
-      ? baseSmall1Y + small1FontSize * lineSpaceMult + small2FontSize * 0.35 + vertGap * 0.4
+      ? baseSmall1Y + small1FontSize * lineSpaceMult + small2FontSize * 0.42 + cleanGap * 0.4
       : baseSmall1Y;
   } else {
     // 'small1-big-small2'
-    baseBigY = baseCenterY + (small1Text ? small1FontSize * 0.25 : 0);
-    baseSmall1Y = baseBigY - giantVisualHeight * 0.56 - small1FontSize * 0.5 - vertGap;
-    baseSmall2Y = baseBigY + giantVisualHeight * 0.48 + small2FontSize * 0.45 + vertGap;
+    baseBigY = baseCenterY + (small1Text ? small1FontSize * 0.28 : 0);
+    baseSmall1Y = baseBigY - giantVisualHeight * 0.62 - small1FontSize * 0.65 - cleanGap;
+    baseSmall2Y = baseBigY + giantVisualHeight * 0.58 + small2FontSize * 0.55 + cleanGap;
   }
 
   // Apply individual X/Y percentage offsets
@@ -817,14 +1669,17 @@ function renderSidzCompositeCaption(
   const bigOffsetX = ((style.bigOffsetX ?? 0) / 100) * canvasWidth;
   const bigOffsetY = ((style.bigOffsetY ?? 0) / 100) * canvasHeight;
 
-  // Compute Big Hero X anchor & clamp so it never overflows left or right edge
+  const trans = computeTransitionTransform(currentTime, segStart, segEnd, style);
+  ctx.globalAlpha = trans.alpha;
+
+  // Compute Big Hero X anchor & allow free placement across the screen
   const blockHalfSpan = Math.max(giantWidth / 2, 90);
   const rawBigAnchorX =
     bigAlign === 'left'
-      ? baseCenterX - blockHalfSpan + bigOffsetX
+      ? baseCenterX - blockHalfSpan + bigOffsetX + trans.dx
       : bigAlign === 'right'
-      ? baseCenterX + blockHalfSpan + bigOffsetX
-      : baseCenterX + bigOffsetX;
+      ? baseCenterX + blockHalfSpan + bigOffsetX + trans.dx
+      : baseCenterX + bigOffsetX + trans.dx;
   const clampedBigAnchorX = clampHorizontalCenter(
     rawBigAnchorX,
     giantWidth,
@@ -838,17 +1693,45 @@ function renderSidzCompositeCaption(
       ? clampedBigAnchorX - giantWidth / 2
       : clampedBigAnchorX;
   const finalBigCenterY = Math.max(
-    giantVisualHeight * 0.45,
-    Math.min(canvasHeight - giantVisualHeight * 0.45, baseBigY + bigOffsetY)
+    canvasHeight * 0.04,
+    Math.min(canvasHeight * 0.96, baseBigY + bigOffsetY + trans.dy)
   );
+
+  // Optional background pill/card if enabled by user
+  const totalStackH =
+    giantVisualHeight +
+    (small1Text ? small1FontSize * 1.3 : 0) +
+    (small2Text ? small2FontSize * 1.3 : 0) +
+    Math.abs(vertGap);
+  const maxStackW = Math.max(giantWidth, small1Width, small2Width, 180);
+
+  if (style.backgroundEnabled && (style.backgroundOpacity ?? 0) > 0.04) {
+    ctx.save();
+    const pad = style.backgroundPaddingPx ?? 18;
+    const rad = style.backgroundRadiusPx ?? 16;
+    ctx.fillStyle = hexToRgba(
+      style.backgroundColor || '#090A0F',
+      style.backgroundOpacity ?? 0.85
+    );
+    drawRoundedRect(
+      ctx,
+      finalBigCenterX - maxStackW / 2 - pad,
+      finalBigCenterY - totalStackH / 2 - pad * 0.6,
+      maxStackW + pad * 2,
+      totalStackH + pad * 1.2,
+      rad
+    );
+    ctx.fill();
+    ctx.restore();
+  }
 
   // Optional dynamic Instagram / Premiere frame that follows the caption block
   drawCaptionDynamicFrame(
     ctx,
     finalBigCenterX,
     finalBigCenterY,
-    Math.max(giantWidth, small1Width, small2Width, 180),
-    giantVisualHeight + (small1Text ? small1FontSize * 1.3 : 0) + (small2Text ? small2FontSize * 1.3 : 0) + Math.abs(vertGap),
+    maxStackW,
+    totalStackH,
     style
   );
 
@@ -867,8 +1750,8 @@ function renderSidzCompositeCaption(
       canvasWidth
     );
     const finalSmall1Y = Math.max(
-      24,
-      Math.min(canvasHeight - 24, baseSmall1Y + small1OffsetY)
+      18,
+      Math.min(canvasHeight - 18, baseSmall1Y + small1OffsetY + trans.dy)
     );
 
     drawChromaticSmallPhrase(
@@ -913,38 +1796,73 @@ function renderSidzCompositeCaption(
   // 2. Draw GIANT Hero Word(s)
   ctx.save();
   ctx.translate(finalBigCenterX, finalBigCenterY);
-  ctx.scale(entranceSpring * heroPopScale, entranceSpring * heroPopScale * verticalStretch);
+  if (trans.rotationRad !== 0) ctx.rotate(trans.rotationRad);
+  ctx.scale(
+    entranceSpring * heroPopScale * trans.scaleX,
+    entranceSpring * heroPopScale * verticalStretch * trans.scaleY
+  );
   ctx.font = `${style.fontWeight} ${giantFontSize}px ${getWordFontStack(style.heroWordFontFamily)}`;
   applyCanvasLetterSpacing(ctx, letterSpace);
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
 
-  // Pass A: Soft colored luminous aura glow
-  ctx.save();
-  ctx.shadowColor = hexToRgba(style.gradientMid || style.highlightColor || '#FDE047', 0.65);
-  ctx.shadowBlur = Math.max(26, style.shadowBlur * 1.2);
-  ctx.shadowOffsetX = 0;
-  ctx.shadowOffsetY = 0;
-  ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
-  ctx.fillText(heroText, 0, 0);
-  ctx.restore();
+  if (style.depth3DEnabled) {
+    const depthPx = Math.max(2, Math.min(20, style.depth3DDepth ?? 8));
+    const angleRad = ((style.depth3DAngle ?? 135) * Math.PI) / 180;
+    const dx3d = Math.cos(angleRad);
+    const dy3d = Math.sin(angleRad);
+    ctx.save();
+    ctx.fillStyle = style.depth3DColor || style.highlightColor || '#FF5722';
+    for (let d = depthPx; d >= 1; d -= 1.5) {
+      ctx.fillText(heroText, dx3d * d, dy3d * d);
+    }
+    ctx.restore();
+  }
+
+  // Pass A: Soft colored luminous aura glow (when glowEnabled)
+  if (style.glowEnabled ?? true) {
+    ctx.save();
+    ctx.shadowColor = hexToRgba(
+      style.glowColor || style.gradientMid || style.highlightColor || '#FDE047',
+      0.65
+    );
+    ctx.shadowBlur = Math.max(18, style.glowSpread || style.shadowBlur * 1.2);
+    ctx.shadowOffsetX = 0;
+    ctx.shadowOffsetY = 0;
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+    ctx.fillText(heroText, 0, 0);
+    ctx.restore();
+  }
 
   // Pass B: Deep dark ambient drop shadow + crisp dark edge
-  ctx.save();
-  ctx.shadowColor = 'rgba(0, 0, 0, 0.92)';
-  ctx.shadowBlur = 20;
-  ctx.shadowOffsetX = 0;
-  ctx.shadowOffsetY = 5;
-  ctx.lineJoin = 'round';
-  ctx.miterLimit = 2;
-  ctx.lineWidth = Math.max(2.5, style.strokeWidth || 3);
-  ctx.strokeStyle = 'rgba(5, 5, 10, 0.92)';
-  ctx.strokeText(heroText, 0, 0);
-  ctx.restore();
+  if ((style.dropShadowEnabled ?? true) || style.strokeWidth > 0) {
+    ctx.save();
+    if (style.dropShadowEnabled ?? true) {
+      ctx.shadowColor = style.dropShadowColor || 'rgba(0, 0, 0, 0.92)';
+      ctx.shadowBlur = style.shadowBlur ?? 20;
+      ctx.shadowOffsetX = style.dropShadowX ?? 0;
+      ctx.shadowOffsetY = style.dropShadowY ?? 5;
+    }
+    ctx.lineJoin = 'round';
+    ctx.miterLimit = 2;
+    ctx.lineWidth = Math.max(2.5, style.strokeWidth || 3);
+    ctx.strokeStyle = style.strokeColor || 'rgba(5, 5, 10, 0.92)';
+    ctx.strokeText(heroText, 0, 0);
+    ctx.restore();
+  }
 
-  // Pass C: Multi-Stop Vertical/Angled Luminous Gradient Fill
+  // Pass C: Multi-Stop Vertical/Angled Luminous Gradient Fill OR Solid Highlight Color
   ctx.fillStyle = createSidzVerticalGradient(ctx, giantFontSize, currentTime, style, giantWidth);
   ctx.fillText(heroText, 0, 0);
+
+  if (style.underlineText) {
+    ctx.beginPath();
+    ctx.strokeStyle = ctx.fillStyle;
+    ctx.lineWidth = Math.max(2.5, giantFontSize * 0.065);
+    ctx.moveTo(-giantWidth / 2, giantFontSize * 0.46);
+    ctx.lineTo(giantWidth / 2, giantFontSize * 0.46);
+    ctx.stroke();
+  }
   ctx.restore();
 
   const hitBig: import('../types/caption').LayerHitBox = {
@@ -986,7 +1904,7 @@ function renderSidzCompositeCaption(
       Math.min(canvasHeight - 24, baseSmall2Y + small2OffsetY)
     );
 
-    if (style.hierarchyMode === 'sidz-20k-script' && twoLineMode !== 'two-line-split') {
+    if (style.hierarchyMode === 'sidz-20k-script' && style.smallTwoLineMode !== 'two-line-split') {
       const scriptFontSize = Math.max(18, Math.round(small2FontSize * 1.28));
       drawSidzScriptTailPhrase(
         ctx,
@@ -1306,6 +2224,7 @@ export function renderReelCanvasFrame(params: {
   transparentAlphaOnly?: boolean;
   isVideo1Visible?: boolean;
   isCaptionsVisible?: boolean;
+  isDraggingCaption?: boolean;
   activeTimelineBroll?: {
     label: string;
     startTime: number;
@@ -1318,6 +2237,7 @@ export function renderReelCanvasFrame(params: {
     startTime: number;
     endTime: number;
   } | null;
+  aiBRollSlots?: AIBRollSlot[];
 }) {
   const {
     ctx,
@@ -1333,8 +2253,10 @@ export function renderReelCanvasFrame(params: {
     transparentAlphaOnly = false,
     isVideo1Visible = true,
     isCaptionsVisible = true,
+    isDraggingCaption = false,
     activeTimelineBroll = null,
     activeTimelineVideo2 = null,
+    aiBRollSlots = [],
   } = params;
 
   if (!isExportRender) {
@@ -1369,96 +2291,103 @@ export function renderReelCanvasFrame(params: {
       ctx.restore();
     } else {
       const clipEdit = style.videoClipEdit;
+      const cropL = Math.max(0, Math.min(45, Number(clipEdit?.cropLeft) || 0));
+      const cropR = Math.max(0, Math.min(45, Number(clipEdit?.cropRight) || 0));
+      const cropT = Math.max(0, Math.min(45, Number(clipEdit?.cropTop) || 0));
+      const cropB = Math.max(0, Math.min(45, Number(clipEdit?.cropBottom) || 0));
+      const cropRound = Math.max(0, Number(clipEdit?.cropRounded) || 0);
+      const hasActiveCrop =
+        cropL > 0 || cropR > 0 || cropT > 0 || cropB > 0 || cropRound > 0;
+
       ctx.save();
       if (clipEdit) {
         ctx.globalAlpha = Math.max(0.05, Math.min(1, (clipEdit.opacity ?? 100) / 100));
-        if (
-          clipEdit.cropLeft > 0 ||
-          clipEdit.cropRight > 0 ||
-          clipEdit.cropTop > 0 ||
-          clipEdit.cropBottom > 0 ||
-          clipEdit.cropRounded > 0
-        ) {
-          const cl = (clipEdit.cropLeft / 100) * canvasWidth;
-          const cr = (clipEdit.cropRight / 100) * canvasWidth;
-          const ct = (clipEdit.cropTop / 100) * canvasHeight;
-          const cb = (clipEdit.cropBottom / 100) * canvasHeight;
+        if (hasActiveCrop) {
+          const cl = (cropL / 100) * canvasWidth;
+          const cr = (cropR / 100) * canvasWidth;
+          const ct = (cropT / 100) * canvasHeight;
+          const cb = (cropB / 100) * canvasHeight;
           const cw = Math.max(40, canvasWidth - cl - cr);
           const ch = Math.max(40, canvasHeight - ct - cb);
-          drawRoundedRect(ctx, cl, ct, cw, ch, clipEdit.cropRounded || 0);
+          drawRoundedRect(ctx, cl, ct, cw, ch, cropRound);
           ctx.clip();
         }
-        ctx.translate(
-          canvasWidth / 2 + (clipEdit.positionX || 0),
-          canvasHeight / 2 + (clipEdit.positionY || 0)
-        );
-        if (clipEdit.rotation) {
-          ctx.rotate((clipEdit.rotation * Math.PI) / 180);
+        const posX = Number(clipEdit.positionX) || 0;
+        const posY = Number(clipEdit.positionY) || 0;
+        const rot = Number(clipEdit.rotation) || 0;
+        const rawZoomX = Math.max(50, Math.min(250, Number(clipEdit.zoomX) || 100));
+        const rawZoomY =
+          clipEdit.zoomLinked !== false
+            ? rawZoomX
+            : Math.max(50, Math.min(250, Number(clipEdit.zoomY) || 100));
+
+        ctx.translate(canvasWidth / 2 + posX, canvasHeight / 2 + posY);
+        if (rot) {
+          ctx.rotate((rot * Math.PI) / 180);
         }
-        const sx =
-          ((clipEdit.zoomX || 100) / 100) * (clipEdit.flipHorizontal ? -1 : 1);
-        const sy =
-          ((clipEdit.zoomY || 100) / 100) * (clipEdit.flipVertical ? -1 : 1);
+        const sx = (rawZoomX / 100) * (clipEdit.flipHorizontal ? -1 : 1);
+        const sy = (rawZoomY / 100) * (clipEdit.flipVertical ? -1 : 1);
         ctx.scale(sx, sy);
         ctx.translate(-canvasWidth / 2, -canvasHeight / 2);
       }
 
       if (hasUploadedVideo && videoElement) {
-        ctx.fillStyle = '#05060A';
-        ctx.fillRect(0, 0, canvasWidth, canvasHeight);
-
         if (videoElement.readyState >= 2 && videoElement.videoWidth > 0 && videoElement.videoHeight > 0) {
           const vw = videoElement.videoWidth;
           const vh = videoElement.videoHeight;
           const canvasRatio = canvasWidth / canvasHeight;
           const videoRatio = vw / vh;
 
-          // If canvas and video have different aspect ratios (e.g. viewing 9:16 video on 16:9 canvas or vice versa),
-          // first draw a soft dimmed ambient backdrop, then draw the 100% complete original video frame (contain)
-          // so the original 9:16 or 16:9 preview is ALWAYS shown in full without cropping!
-          if (Math.abs(videoRatio - canvasRatio) > 0.08) {
+          // Always fill 100% of the canvas background edge-to-edge using the video itself
+          // so there are NEVER black pillarbox/letterbox bars in preview or exported video!
+          let coverW = canvasWidth;
+          let coverH = canvasHeight;
+          if (videoRatio > canvasRatio) {
+            coverH = canvasHeight;
+            coverW = canvasHeight * videoRatio;
+          } else {
+            coverW = canvasWidth;
+            coverH = canvasWidth / videoRatio;
+          }
+          const coverX = (canvasWidth - coverW) / 2;
+          const coverY = (canvasHeight - coverH) / 2;
+
+          if (Math.abs(videoRatio - canvasRatio) <= 0.24) {
+            // Same orientation (e.g. 9:16 portrait video on portrait canvas):
+            // Draw edge-to-edge full-bleed cover so zero black bars appear on left/right/top/bottom!
+            ctx.drawImage(videoElement, coverX, coverY, coverW, coverH);
+          } else {
+            // Cross-orientation (e.g. 9:16 video on 16:9 canvas):
+            // 1. Draw full-opacity blurred edge-to-edge video backdrop (never solid black!)
             ctx.save();
-            ctx.globalAlpha = 0.28;
-            let bgW = canvasWidth;
-            let bgH = canvasHeight;
-            if (videoRatio > canvasRatio) {
-              bgH = canvasHeight;
-              bgW = canvasHeight * videoRatio;
-            } else {
-              bgW = canvasWidth;
-              bgH = canvasWidth / videoRatio;
-            }
+            ctx.filter = 'blur(26px) brightness(0.68)';
             ctx.drawImage(
               videoElement,
-              (canvasWidth - bgW) / 2,
-              (canvasHeight - bgH) / 2,
-              bgW,
-              bgH
+              coverX - canvasWidth * 0.04,
+              coverY - canvasHeight * 0.04,
+              coverW + canvasWidth * 0.08,
+              coverH + canvasHeight * 0.08
             );
             ctx.restore();
+
+            // 2. Draw crisp uncropped video centered on top
+            let drawW = canvasWidth;
+            let drawH = canvasHeight;
+            let offsetX = 0;
+            let offsetY = 0;
+            if (videoRatio > canvasRatio) {
+              drawW = canvasWidth;
+              drawH = canvasWidth / videoRatio;
+              offsetY = (canvasHeight - drawH) / 2;
+            } else {
+              drawH = canvasHeight;
+              drawW = canvasHeight * videoRatio;
+              offsetX = (canvasWidth - drawW) / 2;
+            }
+            ctx.drawImage(videoElement, offsetX, offsetY, drawW, drawH);
           }
 
-          // Calculate exact uncropped fit (contain) so the entire original video frame is visible
-          let drawW = canvasWidth;
-          let drawH = canvasHeight;
-          let offsetX = 0;
-          let offsetY = 0;
-
-          if (videoRatio > canvasRatio) {
-            // Video is wider than canvas: fit full width, letterbox top/bottom
-            drawW = canvasWidth;
-            drawH = canvasWidth / videoRatio;
-            offsetY = (canvasHeight - drawH) / 2;
-          } else {
-            // Video is taller/equal to canvas: fit full height, pillarbox left/right
-            drawH = canvasHeight;
-            drawW = canvasHeight * videoRatio;
-            offsetX = (canvasWidth - drawW) / 2;
-          }
-
-          ctx.drawImage(videoElement, offsetX, offsetY, drawW, drawH);
-
-          // Cache this decoded frame so rapid second-by-second scrubbing never flashes blank
+          // Cache the UNCLIPPED decoded video frame so resetting crop while paused or seeking immediately restores 100% full video
           if (typeof document !== 'undefined') {
             if (
               !lastValidVideoFrameCanvas ||
@@ -1472,7 +2401,7 @@ export function renderReelCanvasFrame(params: {
             const cacheCtx = lastValidVideoFrameCanvas.getContext('2d');
             if (cacheCtx) {
               cacheCtx.clearRect(0, 0, canvasWidth, canvasHeight);
-              cacheCtx.drawImage(ctx.canvas, 0, 0, canvasWidth, canvasHeight);
+              cacheCtx.drawImage(videoElement, coverX, coverY, coverW, coverH);
               lastValidVideoSrc = videoElement.currentSrc || videoElement.src || 'uploaded';
             }
           }
@@ -1480,8 +2409,11 @@ export function renderReelCanvasFrame(params: {
           lastValidVideoFrameCanvas &&
           lastValidVideoSrc === (videoElement.currentSrc || videoElement.src || 'uploaded')
         ) {
-          // While HTMLVideoElement is mid-seek between seconds, keep displaying the last decoded video frame
+          // While HTMLVideoElement is mid-seek, keep displaying the last decoded uncropped video frame (never black!)
           ctx.drawImage(lastValidVideoFrameCanvas, 0, 0, canvasWidth, canvasHeight);
+        } else {
+          ctx.fillStyle = '#10141E';
+          ctx.fillRect(0, 0, canvasWidth, canvasHeight);
         }
       } else {
         ctx.save();
@@ -1493,7 +2425,7 @@ export function renderReelCanvasFrame(params: {
           logicalH,
           currentTime,
           sampleReel,
-          !style.captionDepthBehindSubject
+          !(BEHIND_THE_HEAD_MODULE_ENABLED && style.captionDepthBehindSubject)
         );
         ctx.restore();
       }
@@ -1505,8 +2437,9 @@ export function renderReelCanvasFrame(params: {
   ctx.scale(scaleX, scaleY);
 
   // 1.5 Draw Timeline B-Roll 1 / Video 2 Cutaway Card when active on the Multi-Track Timeline
-  if (!transparentAlphaOnly && (activeTimelineBroll || activeTimelineVideo2)) {
-    const clip = activeTimelineBroll || activeTimelineVideo2;
+  const effectiveTimelineBroll = Boolean(style.brollEnabled) ? activeTimelineBroll : null;
+  if (!transparentAlphaOnly && (effectiveTimelineBroll || activeTimelineVideo2)) {
+    const clip = effectiveTimelineBroll || activeTimelineVideo2;
     if (clip) {
       ctx.save();
       const prog = Math.max(
@@ -1516,7 +2449,7 @@ export function renderReelCanvasFrame(params: {
           (currentTime - clip.startTime) / Math.max(0.3, clip.endTime - clip.startTime)
         )
       );
-      const isBroll = Boolean(activeTimelineBroll);
+      const isBroll = Boolean(effectiveTimelineBroll);
       const cardW = logicalW * 0.84;
       const cardH = logicalH * 0.16;
       const cardX = (logicalW - cardW) / 2;
@@ -1593,138 +2526,501 @@ export function renderReelCanvasFrame(params: {
     ? segments.find((s) => currentTime >= s.startTime && currentTime <= s.endTime + 0.05)
     : undefined;
 
+  // 3.1 Render Active AI B-Roll Scene (3-Image Studio + Per-Caption B-Roll + Magical Effects)
+  // Strictly gated by Boolean(style.brollEnabled) so disabling the toggle hides all B-Roll everywhere
+  if (!transparentAlphaOnly && Boolean(style.brollEnabled)) {
+    const matchedSlot =
+      (activeSegment?.aiBrollSlotId
+        ? aiBRollSlots.find(
+            (slot) => slot.id === activeSegment.aiBrollSlotId && slot.enabled
+          )
+        : undefined) ||
+      (activeSegment
+        ? aiBRollSlots.find(
+            (slot) => slot.enabled && slot.linkedSegmentId === activeSegment.id
+          )
+        : undefined) ||
+      aiBRollSlots.find(
+        (slot) =>
+          slot.enabled &&
+          currentTime >= slot.startTime &&
+          currentTime <= slot.endTime + 0.05
+      );
+
+    const hasSegmentCustomBroll =
+      activeSegment &&
+      (Boolean(activeSegment.brollImageUrl) ||
+        (activeSegment.brollTheme && activeSegment.brollTheme !== 'none'));
+
+    if (matchedSlot || hasSegmentCustomBroll) {
+      const slotStart = matchedSlot
+        ? matchedSlot.startTime
+        : activeSegment?.startTime || 0;
+      const slotEnd = matchedSlot
+        ? matchedSlot.endTime
+        : activeSegment?.endTime || slotStart + 2.5;
+      const prog = Math.max(
+        0,
+        Math.min(1, (currentTime - slotStart) / Math.max(0.35, slotEnd - slotStart))
+      );
+
+      const effectiveRatio: VideoAspectRatio =
+        activeSegment?.aiBrollAspectRatio ||
+        matchedSlot?.aspectRatio ||
+        style.aspectRatio ||
+        '9:16';
+
+      const effectiveLayout: BRollDisplayLayout =
+        activeSegment?.aiBrollDisplayLayout ||
+        matchedSlot?.displayLayout ||
+        style.aiBrollLayout ||
+        (style.brollDisplayMode === 'fullscreen' ? 'cutaway' : 'pip_card');
+
+      const effectiveMotion: BRollMotionPreset =
+        activeSegment?.aiBrollMotionPreset ||
+        matchedSlot?.motionPreset ||
+        style.aiBrollMotionPreset ||
+        'ken_burns_zoom';
+
+      const effectiveMagic: BRollMagicalEffect =
+        activeSegment?.aiBrollMagicalEffect ||
+        matchedSlot?.magicalEffect ||
+        style.aiBrollMagicalEffect ||
+        'all_magic';
+
+      const titleLabel =
+        matchedSlot?.title ||
+        activeSegment?.brollTitle ||
+        `AI B-Roll (${effectiveRatio})`;
+
+      let imageDataUrl =
+        activeSegment?.brollImageUrl || matchedSlot?.imageDataUrl;
+      if (!imageDataUrl && activeSegment) {
+        imageDataUrl = synthesizeStudioBRollArtworkDataUrl(
+          activeSegment.aiBrollPrompt ||
+            activeSegment.brollTitle ||
+            activeSegment.brollTheme ||
+            'Cinematic visual',
+          effectiveRatio,
+          matchedSlot?.slotNumber || 1,
+          titleLabel
+        );
+      }
+
+      const imgEl = getCachedBRollImageElement(imageDataUrl);
+
+      ctx.save();
+
+      // Determine target frame rectangle on logical canvas (logicalW x logicalH)
+      let boxX = 0;
+      let boxY = 0;
+      let boxW = logicalW;
+      let boxH = logicalH;
+      let cornerRadius = 0;
+
+      const targetNumRatio =
+        effectiveRatio === '9:16'
+          ? 9 / 16
+          : effectiveRatio === '1:1'
+          ? 1
+          : 16 / 9;
+
+      if (effectiveLayout === 'cutaway') {
+        // Full-Screen Cutaway: Fill background + frame image in exact selected aspect ratio
+        boxX = 0;
+        boxY = 0;
+        boxW = logicalW;
+        boxH = logicalH;
+        cornerRadius = 0;
+      } else if (effectiveLayout === 'split_backdrop') {
+        // Upper Split Backdrop (top 50% of screen)
+        boxW = logicalW * 0.94;
+        boxH = logicalH * 0.44;
+        boxX = (logicalW - boxW) / 2;
+        boxY = logicalH * 0.04;
+        cornerRadius = 22;
+      } else {
+        // Floating Picture-in-Picture (PiP) Card shaped to exact selected aspect ratio ('9:16', '1:1', '16:9')
+        if (effectiveRatio === '9:16') {
+          boxW = logicalW * 0.42;
+          boxH = Math.min(logicalH * 0.48, boxW / targetNumRatio);
+        } else if (effectiveRatio === '1:1') {
+          boxW = logicalW * 0.56;
+          boxH = boxW;
+        } else {
+          boxW = logicalW * 0.84;
+          boxH = boxW / targetNumRatio;
+        }
+        boxX = (logicalW - boxW) / 2;
+        boxY = logicalH * 0.08;
+        cornerRadius = 22;
+      }
+
+      // Entrance & Exit Envelope + 3D Motion Preset
+      const enterEnv = Math.min(1, prog / 0.14);
+      const exitEnv = Math.min(1, (1 - prog) / 0.12);
+      const alphaEnv = Math.max(0.15, Math.min(1, Math.min(enterEnv, exitEnv)));
+
+      let portalScale = 1;
+      if (effectiveMotion === 'portal_pop') {
+        // Elastic spring pop-in
+        const t = Math.min(1, prog / 0.22);
+        portalScale =
+          t < 1
+            ? 0.72 + Math.sin(t * Math.PI * 0.85) * 0.34
+            : 1 + Math.sin(prog * Math.PI) * 0.02;
+      }
+
+      ctx.globalAlpha = alphaEnv;
+
+      const centerX = boxX + boxW / 2;
+      const centerY = boxY + boxH / 2;
+      ctx.translate(centerX, centerY);
+      ctx.scale(portalScale, portalScale);
+      ctx.translate(-centerX, -centerY);
+
+      // Outer Magical Glowing Aura Burst (behind card)
+      if (effectiveMagic === 'aura_burst' || effectiveMagic === 'all_magic') {
+        ctx.save();
+        const pulse = 0.65 + 0.35 * Math.sin(currentTime * 5.2);
+        const auraGrad = ctx.createRadialGradient(
+          centerX,
+          centerY,
+          Math.min(boxW, boxH) * 0.18,
+          centerX,
+          centerY,
+          Math.max(boxW, boxH) * 0.72
+        );
+        auraGrad.addColorStop(0, `rgba(253, 224, 71, ${0.42 * pulse})`);
+        auraGrad.addColorStop(0.5, `rgba(43, 174, 102, ${0.28 * pulse})`);
+        auraGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+        ctx.fillStyle = auraGrad;
+        ctx.fillRect(
+          boxX - 60,
+          boxY - 60,
+          boxW + 120,
+          boxH + 120
+        );
+        ctx.restore();
+      }
+
+      // Clip to B-Roll container
+      ctx.save();
+      if (cornerRadius > 0) {
+        ctx.shadowColor = 'rgba(0, 0, 0, 0.82)';
+        ctx.shadowBlur = 28;
+        drawRoundedRect(ctx, boxX, boxY, boxW, boxH, cornerRadius);
+        ctx.fillStyle = '#0D1017';
+        ctx.fill();
+        ctx.shadowBlur = 0;
+        ctx.clip();
+      } else {
+        ctx.beginPath();
+        ctx.rect(boxX, boxY, boxW, boxH);
+        ctx.clip();
+      }
+
+      // Draw the AI B-Roll Image with 3D Ken Burns Zoom or Pan-Glide
+      if (imgEl && imgEl.complete && imgEl.naturalWidth > 0) {
+        const iw = imgEl.naturalWidth;
+        const ih = imgEl.naturalHeight;
+        const imgRatio = iw / ih;
+        const containerRatio = boxW / boxH;
+
+        // First fill any aspect difference with a soft-blurred ambient backdrop
+        ctx.save();
+        let bgW = boxW;
+        let bgH = boxH;
+        if (imgRatio > containerRatio) {
+          bgH = boxH;
+          bgW = boxH * imgRatio;
+        } else {
+          bgW = boxW;
+          bgH = boxW / imgRatio;
+        }
+        ctx.drawImage(
+          imgEl,
+          boxX + (boxW - bgW) / 2,
+          boxY + (boxH - bgH) / 2,
+          bgW,
+          bgH
+        );
+        ctx.restore();
+
+        // Compute motion transform (3D Ken Burns Zoom or Pan-Glide)
+        ctx.save();
+        const zoomFactor =
+          effectiveMotion === 'ken_burns_zoom'
+            ? 1.02 + prog * 0.16
+            : effectiveMotion === 'pan_glide'
+            ? 1.12
+            : 1.04 + Math.sin(prog * Math.PI) * 0.06;
+        const panX =
+          effectiveMotion === 'pan_glide'
+            ? (prog - 0.5) * boxW * 0.09
+            : Math.sin(prog * Math.PI) * boxW * 0.02;
+        const panY =
+          effectiveMotion === 'ken_burns_zoom'
+            ? (0.5 - prog) * boxH * 0.04
+            : 0;
+
+        ctx.translate(centerX + panX, centerY + panY);
+        ctx.scale(zoomFactor, zoomFactor);
+        ctx.translate(-centerX, -centerY);
+
+        // Frame image according to its aspect ratio inside container
+        let drawW = boxW;
+        let drawH = boxH;
+        if (Math.abs(imgRatio - containerRatio) <= 0.2) {
+          drawW = boxW;
+          drawH = boxH;
+        } else if (imgRatio > containerRatio) {
+          drawH = boxH;
+          drawW = boxH * imgRatio;
+        } else {
+          drawW = boxW;
+          drawH = boxW / imgRatio;
+        }
+        ctx.drawImage(
+          imgEl,
+          boxX + (boxW - drawW) / 2,
+          boxY + (boxH - drawH) / 2,
+          drawW,
+          drawH
+        );
+        ctx.restore();
+      } else {
+        // Rich gradient fallback while image element decodes
+        const fallbackGrad = ctx.createLinearGradient(
+          boxX,
+          boxY,
+          boxX + boxW,
+          boxY + boxH
+        );
+        fallbackGrad.addColorStop(0, '#0F291E');
+        fallbackGrad.addColorStop(0.5, '#162436');
+        fallbackGrad.addColorStop(1, '#261C0E');
+        ctx.fillStyle = fallbackGrad;
+        ctx.fillRect(boxX, boxY, boxW, boxH);
+      }
+
+      // Magical Effect 1: Cinematic Anamorphic Light Leaks
+      if (effectiveMagic === 'light_leaks' || effectiveMagic === 'all_magic') {
+        ctx.save();
+        ctx.globalCompositeOperation = 'screen';
+        const sweepX = boxX + ((prog * 1.35 - 0.15) * boxW);
+        const leakGrad = ctx.createLinearGradient(
+          sweepX - boxW * 0.45,
+          boxY,
+          sweepX + boxW * 0.45,
+          boxY + boxH
+        );
+        leakGrad.addColorStop(0, 'rgba(0, 0, 0, 0)');
+        leakGrad.addColorStop(0.35, 'rgba(253, 224, 71, 0.24)');
+        leakGrad.addColorStop(0.55, 'rgba(52, 211, 153, 0.22)');
+        leakGrad.addColorStop(0.75, 'rgba(245, 158, 11, 0.18)');
+        leakGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+        ctx.fillStyle = leakGrad;
+        ctx.fillRect(boxX, boxY, boxW, boxH);
+        ctx.restore();
+      }
+
+      // Magical Effect 2: Floating Gold & Emerald Sparkle Particles
+      if (
+        effectiveMagic === 'gold_emerald_particles' ||
+        effectiveMagic === 'all_magic'
+      ) {
+        ctx.save();
+        ctx.globalCompositeOperation = 'screen';
+        const particleCount = 26;
+        for (let i = 0; i < particleCount; i++) {
+          const seedX = ((Math.sin(i * 19.37 + 1.7) * 43758.5453) % 1 + 1) % 1;
+          const seedY = ((Math.cos(i * 43.11 + 3.1) * 19283.412) % 1 + 1) % 1;
+          const driftX =
+            Math.sin(currentTime * (1.2 + (i % 4) * 0.35) + i) * 18;
+          const upwardY =
+            ((seedY - currentTime * (0.08 + (i % 3) * 0.03)) % 1 + 1) % 1;
+          const px = boxX + seedX * boxW + driftX;
+          const py = boxY + upwardY * boxH;
+          const twinkle =
+            0.35 + 0.65 * Math.abs(Math.sin(currentTime * 3.8 + i * 1.3));
+          const radius = (2.2 + (i % 4) * 1.6) * twinkle;
+          const isGold = i % 2 === 0;
+
+          ctx.beginPath();
+          ctx.arc(px, py, radius, 0, Math.PI * 2);
+          ctx.fillStyle = isGold
+            ? `rgba(253, 224, 71, ${0.82 * twinkle})`
+            : `rgba(52, 211, 153, ${0.82 * twinkle})`;
+          ctx.shadowColor = isGold ? '#FDE047' : '#34D399';
+          ctx.shadowBlur = 14;
+          ctx.fill();
+
+          // 4-point magical star glint on every 4th particle
+          if (i % 4 === 0) {
+            ctx.strokeStyle = isGold
+              ? `rgba(255, 250, 205, ${0.85 * twinkle})`
+              : `rgba(167, 243, 208, ${0.85 * twinkle})`;
+            ctx.lineWidth = 1.3;
+            const arm = radius * 2.7;
+            ctx.beginPath();
+            ctx.moveTo(px - arm, py);
+            ctx.lineTo(px + arm, py);
+            ctx.moveTo(px, py - arm);
+            ctx.lineTo(px, py + arm);
+            ctx.stroke();
+          }
+        }
+        ctx.restore();
+      }
+
+      // If Full-Screen Cutaway, add a subtle bottom contrast gradient so captions pop clearly
+      if (effectiveLayout === 'cutaway') {
+        const brollScrim = ctx.createLinearGradient(
+          0,
+          logicalH * 0.42,
+          0,
+          logicalH
+        );
+        brollScrim.addColorStop(0, 'rgba(0, 0, 0, 0.05)');
+        brollScrim.addColorStop(0.6, 'rgba(0, 0, 0, 0.42)');
+        brollScrim.addColorStop(1, 'rgba(0, 0, 0, 0.78)');
+        ctx.fillStyle = brollScrim;
+        ctx.fillRect(0, logicalH * 0.42, logicalW, logicalH * 0.58);
+      }
+
+      ctx.restore(); // end clip
+
+      // Glowing Magical Frame Border for PiP Card & Split Backdrop
+      if (cornerRadius > 0) {
+        ctx.save();
+        drawRoundedRect(ctx, boxX, boxY, boxW, boxH, cornerRadius);
+        const borderGrad = ctx.createLinearGradient(
+          boxX,
+          boxY,
+          boxX + boxW,
+          boxY + boxH
+        );
+        borderGrad.addColorStop(0, 'rgba(253, 224, 71, 0.88)');
+        borderGrad.addColorStop(0.5, 'rgba(43, 174, 102, 0.88)');
+        borderGrad.addColorStop(1, 'rgba(56, 189, 248, 0.75)');
+        ctx.strokeStyle = borderGrad;
+        ctx.lineWidth = 2.6;
+        ctx.shadowColor = 'rgba(253, 224, 71, 0.45)';
+        ctx.shadowBlur = 16;
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      ctx.restore();
+    }
+  }
+
   let activePrimaryText = '';
 
   if (activeSegment) {
-    // Draw Context-Aware AI B-Roll Cutaway when enabled
-    if (
-      style.brollEnabled &&
-      activeSegment.brollTheme &&
-      activeSegment.brollTheme !== 'none' &&
-      !transparentAlphaOnly
-    ) {
-      ctx.save();
-      const segProg = Math.max(
-        0,
-        Math.min(
-          1,
-          (currentTime - activeSegment.startTime) /
-            Math.max(0.4, activeSegment.endTime - activeSegment.startTime)
-        )
-      );
-      const isFullscreen = style.brollDisplayMode === 'fullscreen';
-      const cardW = isFullscreen ? logicalW * 0.92 : logicalW * 0.72;
-      const cardH = isFullscreen ? logicalH * 0.44 : logicalH * 0.17;
-      const cardX = (logicalW - cardW) / 2;
-      const cardY = isFullscreen ? logicalH * 0.42 : logicalH * 0.77;
 
-      ctx.fillStyle = 'rgba(14, 17, 23, 0.92)';
-      ctx.shadowColor = 'rgba(0, 0, 0, 0.75)';
-      ctx.shadowBlur = 24;
-      drawRoundedRect(ctx, cardX, cardY, cardW, cardH, 18);
-      ctx.fill();
-      ctx.shadowBlur = 0;
-
-      ctx.strokeStyle =
-        activeSegment.brollTheme === 'wealth'
-          ? 'rgba(250, 204, 21, 0.65)'
-          : activeSegment.brollTheme === 'community'
-          ? 'rgba(43, 174, 102, 0.65)'
-          : 'rgba(56, 189, 248, 0.65)';
-      ctx.lineWidth = 2;
-      ctx.stroke();
-
-      // Animated Ken Burns visual bars & icon inside B-Roll card
-      const accentHex =
-        activeSegment.brollTheme === 'wealth'
-          ? '#FACC15'
-          : activeSegment.brollTheme === 'community'
-          ? '#2BAE66'
-          : '#38BDF8';
-
-      ctx.fillStyle = hexToRgba(accentHex, 0.16);
-      drawRoundedRect(ctx, cardX + 14, cardY + 14, cardH - 28, cardH - 28, 12);
-      ctx.fill();
-
-      ctx.fillStyle = accentHex;
-      ctx.font = '800 28px "Plus Jakarta Sans", sans-serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      const iconSym =
-        activeSegment.brollTheme === 'wealth'
-          ? '₹📈'
-          : activeSegment.brollTheme === 'community'
-          ? '👥✨'
-          : '⚡🧠';
-      ctx.fillText(iconSym, cardX + 14 + (cardH - 28) / 2, cardY + cardH / 2);
-
-      const textStartX = cardX + cardH + 2;
-      ctx.fillStyle = accentHex;
-      ctx.font = '700 13px "JetBrains Mono", monospace';
-      ctx.textAlign = 'left';
-      ctx.fillText(
-        `AI B-ROLL · ${activeSegment.brollTheme.toUpperCase()} + ${(
-          activeSegment.sfxType || 'WHOOSH'
-        ).toUpperCase()} SFX`,
-        textStartX,
-        cardY + cardH * 0.34
-      );
-
-      ctx.fillStyle = '#FFFFFF';
-      ctx.font = '700 20px "Plus Jakarta Sans", sans-serif';
-      ctx.fillText(
-        activeSegment.brollTitle || 'Context Visual Cutaway',
-        textStartX,
-        cardY + cardH * 0.62
-      );
-
-      // Progress bar inside B-roll card
-      ctx.fillStyle = 'rgba(255,255,255,0.12)';
-      drawRoundedRect(ctx, textStartX, cardY + cardH * 0.8, cardW - cardH - 24, 5, 3);
-      ctx.fill();
-      ctx.fillStyle = accentHex;
-      drawRoundedRect(
-        ctx,
-        textStartX,
-        cardY + cardH * 0.8,
-        (cardW - cardH - 24) * segProg,
-        5,
-        3
-      );
-      ctx.fill();
-      ctx.restore();
-    }
-
-    const primaryTrackData =
+    const rawPrimaryTrackData =
       activeSegment.tracks[style.primaryTrack] ||
-      activeSegment.tracks.english ||
-      activeSegment.tracks.tinglish;
+      activeSegment.tracks.tinglish ||
+      activeSegment.tracks.english;
 
+    const enforceRomanOnCanvas = isRomanTrack(style.primaryTrack);
+    const shouldStripEmojis = style.removeEmojis !== false;
+    const shouldStripPunct = Boolean(style.removePunctuation);
+    const sanitizeCanvasString = (val: string) => {
+      let out = enforceRomanOnCanvas ? transliterateIndicToRoman(val) : val;
+      if (shouldStripEmojis) out = stripEmojisFromText(out);
+      if (shouldStripPunct) out = stripPunctuationFromText(out);
+      return out;
+    };
 
-    const secondaryTrackData =
+    const primaryTrackData = rawPrimaryTrackData
+      ? {
+          text: sanitizeCanvasString(rawPrimaryTrackData.text),
+          words: (rawPrimaryTrackData.words || [])
+            .map((w) => ({
+              ...w,
+              word: sanitizeCanvasString(w.word),
+            }))
+            .filter((w) => w.word.trim().length > 0),
+        }
+      : undefined;
+
+    const rawSecondaryTrackData =
       style.displayMode === 'dual-stacked'
         ? activeSegment.tracks[style.secondaryTrack]
         : undefined;
+    const secondaryTrackData = rawSecondaryTrackData
+      ? {
+          ...rawSecondaryTrackData,
+          text: shouldStripEmojis
+            ? stripEmojisFromText(
+                shouldStripPunct
+                  ? stripPunctuationFromText(rawSecondaryTrackData.text)
+                  : rawSecondaryTrackData.text
+              )
+            : shouldStripPunct
+            ? stripPunctuationFromText(rawSecondaryTrackData.text)
+            : rawSecondaryTrackData.text,
+        }
+      : undefined;
 
     if (primaryTrackData && primaryTrackData.words.length > 0) {
       activePrimaryText = primaryTrackData.text;
       // Merge per-line overrides (Section 5.1 & 5.2)
+      const override = activeSegment.lineStyleOverride;
+      const effectiveFontFamily = override?.fontFamily || style.fontFamily;
+      const effectiveBgEnabled =
+        override?.backgroundEnabled !== undefined
+          ? override.backgroundEnabled
+          : style.backgroundEnabled;
       const effectiveStyle: CaptionStyleConfig = {
         ...style,
-        fontFamily:
-          activeSegment.lineStyleOverride?.fontFamily || style.fontFamily,
-        fontSize: activeSegment.lineStyleOverride?.fontSize || style.fontSize,
-        primaryColor:
-          activeSegment.lineStyleOverride?.primaryColor || style.primaryColor,
-        highlightColor:
-          activeSegment.lineStyleOverride?.secondaryColor || style.highlightColor,
-        positionX:
-          activeSegment.lineStyleOverride?.positionX ?? style.positionX,
-        positionY:
-          activeSegment.lineStyleOverride?.positionY ?? style.positionY,
-        backgroundOpacity: activeSegment.lineStyleOverride?.backgroundEnabled
-          ? Math.max(0.65, style.backgroundOpacity)
-          : style.backgroundOpacity,
+        presetId: override?.templateId || style.presetId,
+        kalakarTemplateId:
+          override?.templateId || style.kalakarTemplateId || style.presetId,
+        fontFamily: effectiveFontFamily,
+        heroWordFontFamily:
+          override?.fontFamily || style.heroWordFontFamily || effectiveFontFamily,
+        accentScriptFontFamily:
+          override?.fontFamily ||
+          style.accentScriptFontFamily ||
+          effectiveFontFamily,
+        fontFace: override?.fontFace || style.fontFace,
+        fontWeight:
+          override?.fontFace === 'Regular'
+            ? 400
+            : override?.fontFace === 'Medium'
+            ? 500
+            : override?.fontFace === 'SemiBold' ||
+              override?.fontFace === 'Semi Bold (600)'
+            ? 600
+            : override?.fontFace === 'Bold' || override?.fontFace === 'Bold (700)'
+            ? 700
+            : override?.fontFace === 'Black' || override?.fontFace === 'Black (900)'
+            ? 900
+            : style.fontWeight,
+        fontSize: override?.fontSize || style.fontSize,
+        line1FontSizePx:
+          activeSegment.line1FontSizePx ??
+          override?.line1FontSizePx ??
+          style.line1FontSizePx,
+        line2FontSizePx:
+          activeSegment.line2FontSizePx ??
+          override?.line2FontSizePx ??
+          style.line2FontSizePx,
+        primaryColor: override?.primaryColor || style.primaryColor,
+        highlightColor: override?.secondaryColor || style.highlightColor,
+        positionX: override?.positionX ?? style.positionX,
+        positionY: override?.positionY ?? style.positionY,
+        backgroundEnabled: effectiveBgEnabled,
+        backgroundOpacity:
+          override?.backgroundEnabled !== undefined
+            ? override.backgroundEnabled
+              ? Math.max(0.85, style.backgroundOpacity || 0.92)
+              : 0
+            : style.backgroundOpacity,
         arcEnabled:
           Boolean(activeSegment.arcCurveDeg) || Boolean(style.arcEnabled),
         arcCurveDeg:
@@ -1736,23 +3032,24 @@ export function renderReelCanvasFrame(params: {
           : style.horizontalSpacing,
       };
 
-      // When Depth Mask (Placed caption behind subject) is ON, automatically anchor the caption
+      // When Depth Mask (Placed caption behind subject) is ON and module is enabled, automatically anchor the caption
       // in the Behind-Head Zone so the speaker's head/hair overlaps the lower portion of the giant hook text!
+      const isBehindHeadActive =
+        BEHIND_THE_HEAD_MODULE_ENABLED &&
+        Boolean(effectiveStyle.captionDepthBehindSubject);
       let autoBehindHeadY = effectiveStyle.positionY;
-      if (effectiveStyle.captionDepthBehindSubject) {
+      if (isBehindHeadActive) {
         if (hasUploadedVideo && videoElement && videoElement.readyState >= 2) {
           const tracked = updateVideoSubjectDepthMatte(videoElement, 0.68);
-          // If positionY is still in the default lower/middle zone (> 42%), auto-lift to tracked behind-head height
           if (autoBehindHeadY > 42) {
             autoBehindHeadY = tracked.recommendedCaptionYPercent;
           }
         } else if (autoBehindHeadY > 44) {
-          // Sample reel speaker head is at ~45% Y, so 36% places giant text right behind the upper head/hair!
           autoBehindHeadY = 36;
         }
       }
 
-      const depthAdjustedStyle: CaptionStyleConfig = effectiveStyle.captionDepthBehindSubject
+      const depthAdjustedStyle: CaptionStyleConfig = isBehindHeadActive
         ? {
             ...effectiveStyle,
             positionY: autoBehindHeadY,
@@ -1760,13 +3057,40 @@ export function renderReelCanvasFrame(params: {
           }
         : effectiveStyle;
 
+      const customL1 =
+        activeSegment.customLine1Text !== undefined
+          ? sanitizeCanvasString(activeSegment.customLine1Text)
+          : undefined;
+      const customL2 =
+        activeSegment.customLine2Text !== undefined
+          ? sanitizeCanvasString(activeSegment.customLine2Text)
+          : undefined;
+
+      const isLalaMode =
+        depthAdjustedStyle.hierarchyMode === 'lala-handwritten' ||
+        depthAdjustedStyle.presetId === 'kalakar-lala';
+
       const isSidzMode =
         depthAdjustedStyle.hierarchyMode === 'sidz-vairagya' ||
         depthAdjustedStyle.hierarchyMode === 'sidz-20k-script' ||
         depthAdjustedStyle.hierarchyMode === 'sidz-valuing-wide' ||
         depthAdjustedStyle.hierarchyMode === 'sidz-truly-flame';
 
-      if (
+      if (isLalaMode && !depthAdjustedStyle.arcEnabled) {
+        renderLalaHandwrittenCaption(
+          ctx,
+          logicalW,
+          logicalH,
+          currentTime,
+          activeSegment.startTime,
+          activeSegment.endTime,
+          primaryTrackData.words,
+          depthAdjustedStyle,
+          isExportRender,
+          customL1,
+          customL2
+        );
+      } else if (
         isSidzMode &&
         depthAdjustedStyle.animationType === 'premiere-pro' &&
         !depthAdjustedStyle.arcEnabled
@@ -1780,7 +3104,9 @@ export function renderReelCanvasFrame(params: {
           activeSegment.endTime,
           primaryTrackData.words,
           depthAdjustedStyle,
-          isExportRender
+          isExportRender,
+          customL1,
+          customL2
         );
       } else {
         renderAnimatedPrimaryCaption(
@@ -1792,7 +3118,9 @@ export function renderReelCanvasFrame(params: {
           activeSegment.endTime,
           primaryTrackData.words,
           depthAdjustedStyle,
-          isExportRender
+          isExportRender,
+          customL1,
+          customL2
         );
       }
     }
@@ -1814,10 +3142,14 @@ export function renderReelCanvasFrame(params: {
   }
 
   // 3.5 Layer 3: Real-Time Foreground Subject Cutout (Placed ON TOP of Behind-Head Captions when Depth Mask is ON!)
-  if (style.captionDepthBehindSubject && !transparentAlphaOnly && isVideo1Visible) {
+  if (
+    BEHIND_THE_HEAD_MODULE_ENABLED &&
+    style.captionDepthBehindSubject &&
+    !transparentAlphaOnly &&
+    isVideo1Visible
+  ) {
     if (hasUploadedVideo && videoElement && videoElement.readyState >= 2) {
       ctx.save();
-      // Reset logical scale so foreground cutout draws at exact physical canvas resolution
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       renderForegroundSubjectCutoutLayer({
         ctx,
@@ -1830,13 +3162,12 @@ export function renderReelCanvasFrame(params: {
       });
       ctx.restore();
     } else {
-      // Sample Reel Foreground Subject rendered on top of the behind-head caption!
       drawSampleReelForegroundSubject(ctx, logicalW, logicalH, currentTime);
     }
   }
 
-  // 4. Optional Authentic Instagram Reels Frame Overlay (Like, Comment, Share, Save, Bottom Bar)
-  if (style.showInstagramFrame) {
+  // 4. Optional Authentic Instagram Reels Frame Overlay (NEVER rendered during video export unless explicitly enabled)
+  if (style.showInstagramFrame && !isExportRender) {
     drawInstagramReelsFrameOverlay(
       ctx,
       logicalW,
@@ -1847,9 +3178,41 @@ export function renderReelCanvasFrame(params: {
     );
   }
 
-  // 5. Optional Safe Zone Overlay (NEVER rendered during video export)
-  if (style.showSafeZones && !isExportRender) {
-    drawSafeZonesGuide(ctx, logicalW, logicalH, style);
+  // 5. Combined Horizontal & Vertical Center-Centric Guidelines (Moves dynamically according to the caption text; Editor-Only, NEVER exported!)
+  if (!isExportRender && !transparentAlphaOnly && (isDraggingCaption || style.showSafeZones)) {
+    const activePosX = activeSegment?.lineStyleOverride?.positionX ?? style.positionX ?? 50;
+    const activePosY = activeSegment?.lineStyleOverride?.positionY ?? style.positionY ?? 72;
+    const activeLayerOffsetX =
+      style.selectedCanvasLayer === 'small1'
+        ? style.smallOffsetX ?? 0
+        : style.selectedCanvasLayer === 'small2'
+        ? style.smallLine2OffsetX ?? 0
+        : style.bigOffsetX ?? 0;
+    const activeLayerOffsetY =
+      style.selectedCanvasLayer === 'small1'
+        ? style.smallOffsetY ?? 0
+        : style.selectedCanvasLayer === 'small2'
+        ? style.smallLine2OffsetY ?? 0
+        : style.bigOffsetY ?? 0;
+
+    const captionCenterX = Math.max(
+      24,
+      Math.min(logicalW - 24, ((activePosX + activeLayerOffsetX) / 100) * logicalW)
+    );
+    const captionCenterY = Math.max(
+      24,
+      Math.min(logicalH - 24, ((activePosY + activeLayerOffsetY) / 100) * logicalH)
+    );
+
+    drawSafeZonesGuide(
+      ctx,
+      logicalW,
+      logicalH,
+      style,
+      captionCenterX,
+      captionCenterY,
+      isDraggingCaption
+    );
   }
 
   ctx.restore();
@@ -1874,25 +3237,52 @@ function renderAnimatedPrimaryCaption(
   _segEnd: number,
   words: WordTiming[],
   style: CaptionStyleConfig,
-  isExportRender = false
+  isExportRender = false,
+  customLine1Text?: string,
+  customLine2Text?: string
 ) {
   ctx.save();
 
-  let activeWordIdx = words.findIndex(
+  let effectiveWords = words;
+  if (customLine1Text !== undefined || customLine2Text !== undefined) {
+    const l1Tokens = (customLine1Text ?? '').trim().split(/\s+/).filter(Boolean);
+    const l2Tokens = (customLine2Text ?? '').trim().split(/\s+/).filter(Boolean);
+    const allCustomTokens = [...l1Tokens, ...l2Tokens];
+    if (allCustomTokens.length > 0) {
+      const segDur = Math.max(0.25, _segEnd - segStart);
+      const step = segDur / allCustomTokens.length;
+      effectiveWords = allCustomTokens.map((wText, idx) => ({
+        word: wText,
+        startTime: segStart + idx * step,
+        endTime: segStart + (idx + 1) * step,
+        isHero: idx >= l1Tokens.length || l1Tokens.length === 0,
+      }));
+    }
+  }
+
+  let activeWordIdx = effectiveWords.findIndex(
     (w) => currentTime >= w.startTime && currentTime <= w.endTime
   );
   if (activeWordIdx === -1) {
-    if (currentTime < words[0].startTime) activeWordIdx = 0;
-    else activeWordIdx = words.length - 1;
+    if (effectiveWords.length === 0 || currentTime < effectiveWords[0].startTime) {
+      activeWordIdx = 0;
+    } else {
+      activeWordIdx = effectiveWords.length - 1;
+    }
   }
+
+  const configuredWordsPerLine =
+    style.wordsPerLine && style.wordsPerLine > 0
+      ? style.wordsPerLine
+      : Math.max(1, effectiveWords.length);
 
   const chunkSize =
     style.animationType === 'stomp'
-      ? Math.min(2, style.wordsPerLine)
-      : Math.max(1, style.wordsPerLine);
+      ? Math.min(2, configuredWordsPerLine)
+      : Math.max(1, configuredWordsPerLine);
 
   const pageIndex = Math.floor(activeWordIdx / chunkSize);
-  const pageWords = words.slice(pageIndex * chunkSize, (pageIndex + 1) * chunkSize);
+  const pageWords = effectiveWords.slice(pageIndex * chunkSize, (pageIndex + 1) * chunkSize);
   const localActiveIdx = activeWordIdx - pageIndex * chunkSize;
 
   const hasExplicitHeroInPage = pageWords.some((w) => w.isHero);
@@ -1921,13 +3311,20 @@ function renderAnimatedPrimaryCaption(
     const scaleFactor = isMixedScale
       ? useBigScale
         ? Math.min(2.25, style.bigWordScale || 1.45)
-        : style.smallWordScale || 0.72
+        : Math.max(0.68, style.smallWordScale || 0.75)
       : 1.0;
 
-    let computedFontSize = Math.round(style.fontSize * aspectFontScale * scaleFactor);
+    const explicitPx = useBigScale ? style.line2FontSizePx : style.line1FontSizePx;
+    let computedFontSize = explicitPx
+      ? Math.round(explicitPx * aspectFontScale)
+      : Math.round(style.fontSize * aspectFontScale * scaleFactor);
     const chosenFamily =
       useBigScale && style.heroWordFontFamily ? style.heroWordFontFamily : style.fontFamily;
-    const display = transformWord(w.word, style.textTransform);
+    const effectiveTransform =
+      useBigScale && style.emphasisTransform && style.emphasisTransform !== 'none'
+        ? style.emphasisTransform
+        : style.textTransform;
+    const display = transformWord(w.word, effectiveTransform);
 
     ctx.font = `${style.fontWeight} ${computedFontSize}px ${getWordFontStack(chosenFamily)}`;
     applyCanvasLetterSpacing(ctx, style.letterSpacing ?? 0);
@@ -2018,6 +3415,7 @@ function renderAnimatedPrimaryCaption(
     lines.push(...expandedLines);
   }
 
+  const trans = computeTransitionTransform(currentTime, segStart, _segEnd, style);
   const lineSpaceMult = Number(style.lineSpacing ?? 1.24);
   const vertGap = Number(style.verticalSpacing ?? 0);
   const lineHeights = lines.map((line) => {
@@ -2025,8 +3423,8 @@ function renderAnimatedPrimaryCaption(
     return maxFontInLine * lineSpaceMult + vertGap * 0.35;
   });
   const totalBlockHeight = lineHeights.reduce((acc, h) => acc + h, 0);
-  const baseCenterX = ((style.positionX ?? 50) / 100) * canvasWidth;
-  const baseCenterY = ((style.positionY ?? 66) / 100) * canvasHeight;
+  const baseCenterX = ((style.positionX ?? 50) / 100) * canvasWidth + trans.dx;
+  const baseCenterY = ((style.positionY ?? 66) / 100) * canvasHeight + trans.dy;
 
   const lineWidths = lines.map(
     (line) =>
@@ -2045,16 +3443,16 @@ function renderAnimatedPrimaryCaption(
     style
   );
 
-  if (style.backgroundOpacity > 0.02) {
-    const padX = 26;
-    const padY = 18;
+  if (style.backgroundEnabled !== false && style.backgroundOpacity > 0.02) {
+    const padX = style.backgroundPaddingPx ?? 26;
+    const padY = Math.round((style.backgroundPaddingPx ?? 26) * 0.7);
     const boxX = baseCenterX - maxRenderedLineWidth / 2 - padX;
     const boxY = baseCenterY - totalBlockHeight / 2 - padY;
     const boxW = maxRenderedLineWidth + padX * 2;
     const boxH = totalBlockHeight + padY * 2;
 
-    ctx.fillStyle = hexToRgba(style.backgroundColor, style.backgroundOpacity);
-    drawRoundedRect(ctx, boxX, boxY, boxW, boxH, 18);
+    ctx.fillStyle = hexToRgba(style.backgroundColor, style.backgroundOpacity * trans.alpha);
+    drawRoundedRect(ctx, boxX, boxY, boxW, boxH, style.backgroundRadiusPx ?? 18);
     ctx.fill();
   }
 
@@ -2112,11 +3510,13 @@ function renderAnimatedPrimaryCaption(
         ? baseCenterX + maxRenderedLineWidth / 2 - lineW + layerOffsetX
         : baseCenterX - lineW / 2 + layerOffsetX;
 
-    // Clamp line horizontally within safe canvas margins
-    const margin = canvasWidth * 0.04;
-    let cursorX = Math.max(margin, Math.min(canvasWidth - margin - lineW, alignedStartX));
+    // Allow unrestricted horizontal and vertical placement across the screen
+    let cursorX = Math.max(
+      -lineW * 0.4,
+      Math.min(canvasWidth - lineW * 0.6, alignedStartX)
+    );
     const lineStartX = cursorX;
-    const lineY = Math.max(24, Math.min(canvasHeight - 24, baseLineY + layerOffsetY));
+    const lineY = Math.max(16, Math.min(canvasHeight - 16, baseLineY + layerOffsetY));
 
     line.forEach((token) => {
       const isSpoken = token.localIdx === localActiveIdx;
@@ -2133,11 +3533,13 @@ function renderAnimatedPrimaryCaption(
       }
 
       ctx.save();
+      const applyTransToWord =
+        style.transitionScope !== 'emphasized' || token.isBigHero || isSpoken;
       const wordCenterX = cursorX + token.width / 2;
       let wordCenterY = lineY;
       let scale = 1;
-      let rotationRad = 0;
-      let alpha = segFadeAlpha;
+      let rotationRad = applyTransToWord ? trans.rotationRad : 0;
+      let alpha = segFadeAlpha * (applyTransToWord ? trans.alpha : 1);
 
       if (style.animationType === 'premiere-pro') {
         if (isSpoken) {
@@ -2147,10 +3549,10 @@ function renderAnimatedPrimaryCaption(
           scale = 1.06 + 0.14 * popSpring;
           wordCenterY -= 6 * popSpring;
           if (token.isBigHero) {
-            rotationRad = -0.025 * Math.sin(wordProgress * Math.PI);
+            rotationRad += -0.025 * Math.sin(wordProgress * Math.PI);
           }
         } else if (!isPast && !token.isBigHero) {
-          alpha = 0.85;
+          alpha *= 0.85;
         }
       } else if (style.animationType === 'karaoke' && isSpoken) {
         scale = 1 + 0.1 * Math.sin(wordProgress * Math.PI);
@@ -2162,7 +3564,7 @@ function renderAnimatedPrimaryCaption(
           scale = 1 + 0.18 * spring;
           wordCenterY -= 8 * spring;
         } else if (!isPast) {
-          alpha = 0.75;
+          alpha *= 0.75;
         }
       } else if (style.animationType === 'stomp') {
         if (isSpoken) {
@@ -2190,7 +3592,10 @@ function renderAnimatedPrimaryCaption(
 
       ctx.translate(wordCenterX, wordCenterY);
       if (rotationRad !== 0) ctx.rotate(rotationRad);
-      ctx.scale(scale, scale);
+      ctx.scale(
+        scale * (applyTransToWord ? trans.scaleX : 1),
+        scale * (applyTransToWord ? trans.scaleY : 1)
+      );
       ctx.globalAlpha = alpha;
 
       ctx.font = `${style.fontWeight} ${token.fontSize}px ${getWordFontStack(token.fontFamily)}`;
@@ -2309,11 +3714,15 @@ function renderAnimatedPrimaryCaption(
 
         ctx.fillStyle = shouldColorWithGradient
           ? activeGradientOrColor
-          : style.primaryColor;
+          : createBaseTextFill(ctx, token.fontSize, currentTime, style, token.width);
         ctx.fillText(renderedText, 0, 0);
       }
 
-      if (style.underlineText || token.raw.isUnderlined) {
+      if (
+        style.underlineText ||
+        token.raw.isUnderlined ||
+        (token.isBigHero && style.emphasisUnderline)
+      ) {
         ctx.beginPath();
         ctx.strokeStyle = ctx.fillStyle;
         ctx.lineWidth = Math.max(2, token.fontSize * 0.07);
@@ -2728,47 +4137,329 @@ function drawSafeZonesGuide(
   ctx: CanvasRenderingContext2D,
   width: number,
   height: number,
-  style?: CaptionStyleConfig
+  style?: CaptionStyleConfig,
+  captionCenterX?: number,
+  captionCenterY?: number,
+  isDraggingCaption = false
 ) {
   ctx.save();
-  const opacity = Math.max(0.25, Math.min(1, style?.safeZoneOpacity ?? 0.85));
+  const opacity = Math.max(0.45, Math.min(1, style?.safeZoneOpacity ?? 0.94));
   ctx.globalAlpha = opacity;
 
-  // 1. Subtle 3x3 Rule-of-Thirds Grid Lines (white translucent)
-  ctx.strokeStyle = 'rgba(255, 255, 255, 0.28)';
-  ctx.lineWidth = 1.2;
-  ctx.setLineDash([]);
+  const preset = style?.safeZonePreset || 'instagram-reels';
+  const showSafeZoneMask = Boolean(style?.showSafeZones);
 
-  // Vertical thirds
-  [width / 3, (width * 2) / 3].forEach((vx) => {
+  if (showSafeZoneMask) {
+    const fillDeepEmerald = 'rgba(15, 58, 41, 0.86)';
+    const fillRightEmerald = 'rgba(18, 70, 49, 0.78)';
+    const skeletonFill = 'rgba(148, 166, 157, 0.88)';
+    const skeletonMuted = 'rgba(148, 166, 157, 0.65)';
+    const frameBorderStroke = 'rgba(43, 174, 102, 0.28)';
+
+    const fillCircle = (cx: number, cy: number, r: number, color = skeletonFill) => {
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.fillStyle = color;
+      ctx.fill();
+    };
+
+    const fillPill = (
+      x: number,
+      y: number,
+      w: number,
+      h: number,
+      rx: number,
+      color = skeletonFill
+    ) => {
+      ctx.fillStyle = color;
+      drawRoundedRect(ctx, x, y, w, h, rx);
+      ctx.fill();
+    };
+
+    if (preset === 'instagram-story') {
+      // =======================================================================
+      // INSTAGRAM STORY SAFE ZONE & SAFE ZONE FRAME
+      // Top Story progress bars + Avatar/Username header + Bottom "Send message" & Heart/Share
+      // =======================================================================
+      const topH = height * 0.125;
+      const botY = height * 0.855;
+      const sideW = width * 0.045;
+
+      // Top unsafe band
+      ctx.fillStyle = fillDeepEmerald;
+      ctx.fillRect(0, 0, width, topH);
+      // Bottom unsafe band
+      ctx.fillRect(0, botY, width, height - botY);
+      // Left & Right safe margin strips
+      ctx.fillRect(0, topH, sideW, botY - topH);
+      ctx.fillRect(width - sideW, topH, sideW, botY - topH);
+
+      // Safe zone inner border
+      ctx.strokeStyle = frameBorderStroke;
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(sideW, topH, width - sideW * 2, botY - topH);
+
+      // Top Story 3-segment progress bars
+      const segGap = width * 0.015;
+      const segW = (width - width * 0.08 - segGap * 2) / 3;
+      for (let i = 0; i < 3; i++) {
+        fillPill(
+          width * 0.04 + i * (segW + segGap),
+          height * 0.02,
+          segW,
+          height * 0.005,
+          3,
+          i === 0 ? skeletonFill : skeletonMuted
+        );
+      }
+
+      // Story Avatar circle + Username bar on top-left
+      fillCircle(width * 0.08, height * 0.068, width * 0.028);
+      fillPill(width * 0.125, height * 0.056, width * 0.25, height * 0.022, 6);
+
+      // Top-right Story menu & close circles
+      fillCircle(width * 0.835, height * 0.068, width * 0.022);
+      fillCircle(width * 0.918, height * 0.068, width * 0.026);
+
+      // Bottom Story "Send message" pill + Heart & Share circles
+      fillPill(
+        width * 0.04,
+        height * 0.912,
+        width * 0.685,
+        height * 0.038,
+        height * 0.019
+      );
+      fillCircle(width * 0.815, height * 0.931, width * 0.026);
+      fillCircle(width * 0.912, height * 0.931, width * 0.026);
+    } else if (preset === 'tiktok-foryou') {
+      // =======================================================================
+      // TIKTOK SAFE ZONE & SAFE ZONE FRAME
+      // Top Following/For You tabs + Search + Right 6-icon stack + Bottom caption & music ticker
+      // =======================================================================
+      const topH = height * 0.118;
+      const botY = height * 0.835;
+      const leftW = width * 0.048;
+      const rightStripX = width * 0.802;
+      const rightStripTopY = height * 0.42;
+      const rightMarginW = width * 0.065;
+
+      ctx.fillStyle = fillDeepEmerald;
+      // Top band
+      ctx.fillRect(0, 0, width, topH);
+      // Bottom band
+      ctx.fillRect(0, botY, width, height - botY);
+      // Left margin
+      ctx.fillRect(0, topH, leftW, botY - topH);
+      // Upper-right margin
+      ctx.fillRect(width - rightMarginW, topH, rightMarginW, rightStripTopY - topH);
+      // Right-side TikTok action strip
+      ctx.fillStyle = fillRightEmerald;
+      ctx.fillRect(rightStripX, rightStripTopY, width - rightStripX, botY - rightStripTopY);
+
+      // Top TikTok "LIVE" pill (left), "Following | For You" pills (center), Search circle (right)
+      fillPill(width * 0.04, height * 0.052, width * 0.1, height * 0.024, 6, skeletonMuted);
+      fillPill(width * 0.31, height * 0.052, width * 0.17, height * 0.024, 6, skeletonMuted);
+      fillPill(width * 0.51, height * 0.052, width * 0.17, height * 0.024, 6, skeletonFill);
+      fillCircle(width * 0.915, height * 0.064, width * 0.028);
+
+      // Right-side 6 TikTok circles (Creator Avatar + Heart + Comment + Bookmark + Share + Spinning Disc)
+      const rightCx = width * 0.892;
+      const startCy = height * 0.468;
+      const stepCy = height * 0.064;
+      for (let i = 0; i < 6; i++) {
+        fillCircle(
+          rightCx,
+          startCy + i * stepCy,
+          i === 0 || i === 5 ? width * 0.034 : width * 0.03
+        );
+      }
+
+      // Bottom-left @username + 3 caption/hashtag bars + scrolling music bar
+      fillPill(width * 0.038, height * 0.848, width * 0.29, height * 0.016, 4);
+      fillPill(width * 0.038, height * 0.871, width * 0.54, height * 0.015, 4);
+      fillPill(width * 0.038, height * 0.893, width * 0.41, height * 0.015, 4);
+      // Bottom comment / navigation bar + 2 right circles
+      fillPill(
+        width * 0.038,
+        height * 0.93,
+        width * 0.69,
+        height * 0.035,
+        height * 0.0175
+      );
+      fillCircle(width * 0.822, height * 0.948, width * 0.024);
+      fillCircle(width * 0.915, height * 0.948, width * 0.024);
+    } else if (preset === 'youtube-shorts') {
+      // =======================================================================
+      // YOUTUBE SHORTS SAFE ZONE & SAFE ZONE FRAME
+      // =======================================================================
+      const topH = height * 0.112;
+      const botY = height * 0.84;
+      const leftW = width * 0.048;
+      const rightStripX = width * 0.804;
+      const rightStripTopY = height * 0.45;
+      const rightMarginW = width * 0.065;
+
+      ctx.fillStyle = fillDeepEmerald;
+      ctx.fillRect(0, 0, width, topH);
+      ctx.fillRect(0, botY, width, height - botY);
+      ctx.fillRect(0, topH, leftW, botY - topH);
+      ctx.fillRect(width - rightMarginW, topH, rightMarginW, rightStripTopY - topH);
+      ctx.fillStyle = fillRightEmerald;
+      ctx.fillRect(rightStripX, rightStripTopY, width - rightStripX, botY - rightStripTopY);
+
+      // Top-left Shorts pill + Top-right Search & Menu circles
+      fillPill(width * 0.04, height * 0.052, width * 0.16, height * 0.025, 6);
+      fillCircle(width * 0.825, height * 0.064, width * 0.025);
+      fillCircle(width * 0.915, height * 0.064, width * 0.025);
+
+      // Right-side 5 Shorts action circles + bottom square audio thumb
+      const rightCx = width * 0.892;
+      for (let i = 0; i < 5; i++) {
+        fillCircle(rightCx, height * 0.51 + i * (height * 0.062), width * 0.03);
+      }
+
+      // Bottom Channel avatar + handle + Subscribe pill + caption lines
+      fillPill(width * 0.038, height * 0.854, width * 0.3, height * 0.016, 4);
+      fillPill(width * 0.038, height * 0.876, width * 0.52, height * 0.015, 4);
+      fillPill(width * 0.038, height * 0.898, width * 0.38, height * 0.015, 4);
+      fillPill(
+        width * 0.038,
+        height * 0.932,
+        width * 0.695,
+        height * 0.034,
+        height * 0.017
+      );
+      fillCircle(width * 0.822, height * 0.949, width * 0.024);
+      fillCircle(width * 0.915, height * 0.949, width * 0.024);
+    } else if (preset === 'instagram-feed') {
+      // =======================================================================
+      // INSTAGRAM FEED SAFE ZONE & SAFE ZONE FRAME
+      // =======================================================================
+      const topH = height * 0.11;
+      const botY = height * 0.85;
+      const sideW = width * 0.05;
+
+      ctx.fillStyle = fillDeepEmerald;
+      ctx.fillRect(0, 0, width, topH);
+      ctx.fillRect(0, botY, width, height - botY);
+      ctx.fillRect(0, topH, sideW, botY - topH);
+      ctx.fillRect(width - sideW, topH, sideW, botY - topH);
+
+      // Top Feed header
+      fillCircle(width * 0.08, height * 0.058, width * 0.026);
+      fillPill(width * 0.125, height * 0.047, width * 0.24, height * 0.022, 5);
+      fillCircle(width * 0.915, height * 0.058, width * 0.024);
+
+      // Bottom Feed interaction bar + caption lines
+      fillPill(width * 0.038, height * 0.862, width * 0.28, height * 0.015, 4);
+      fillPill(width * 0.038, height * 0.884, width * 0.51, height * 0.015, 4);
+      fillPill(
+        width * 0.038,
+        height * 0.928,
+        width * 0.69,
+        height * 0.034,
+        height * 0.017
+      );
+      fillCircle(width * 0.822, height * 0.945, width * 0.024);
+      fillCircle(width * 0.915, height * 0.945, width * 0.024);
+    } else {
+      // =======================================================================
+      // INSTAGRAM REELS SAFE ZONE & SAFE ZONE FRAME (EXACT MATCH TO IMAGE 2!)
+      // Top band (left rounded rectangle + right circle)
+      // Right vertical column starting mid-frame with 5 vertical grey circles
+      // Bottom band with 3 stacked grey caption bars + wide message pill + 2 right circles
+      // =======================================================================
+      const topH = height * 0.118;
+      const botY = height * 0.844;
+      const leftMarginW = width * 0.052;
+      const rightUpperMarginW = width * 0.068;
+      const rightStripX = width * 0.802;
+      const rightStripTopY = height * 0.468;
+
+      // 1. Top Unsafe Header Band
+      ctx.fillStyle = fillDeepEmerald;
+      ctx.fillRect(0, 0, width, topH);
+
+      // 2. Bottom Unsafe Caption & Comment Band
+      ctx.fillRect(0, botY, width, height - botY);
+
+      // 3. Left Safe Margin Strip
+      ctx.fillRect(0, topH, leftMarginW, botY - topH);
+
+      // 4. Upper-Right Safe Margin Strip (above the 5-icon column)
+      ctx.fillRect(
+        width - rightUpperMarginW,
+        topH,
+        rightUpperMarginW,
+        rightStripTopY - topH
+      );
+
+      // 5. Lower-Right Vertical Action Strip (contains the 5 vertical grey circles!)
+      ctx.fillStyle = fillRightEmerald;
+      ctx.fillRect(
+        rightStripX,
+        rightStripTopY,
+        width - rightStripX,
+        botY - rightStripTopY
+      );
+
+      // Top-left rounded rectangle pill + Top-right circle (Exact Image 2 match)
+      fillPill(width * 0.036, height * 0.055, width * 0.142, height * 0.024, 5);
+      fillCircle(width * 0.918, height * 0.067, width * 0.028);
+
+      // Right-side 5 vertical grey action circles (Exact Image 2 match)
+      const rightIconCx = width * 0.888;
+      const firstIconCy = height * 0.592;
+      const iconStepY = height * 0.052;
+      for (let i = 0; i < 5; i++) {
+        fillCircle(rightIconCx, firstIconCy + i * iconStepY, width * 0.031);
+      }
+
+      // Bottom-left 3 stacked horizontal grey skeleton bars (Exact Image 2 match)
+      fillPill(width * 0.036, height * 0.854, width * 0.275, height * 0.015, 4);
+      fillPill(width * 0.036, height * 0.876, width * 0.512, height * 0.015, 4);
+      fillPill(width * 0.036, height * 0.898, width * 0.366, height * 0.015, 4);
+
+      // Bottom-most wide rounded pill + 2 right circles (Exact Image 2 match)
+      fillPill(
+        width * 0.036,
+        height * 0.931,
+        width * 0.695,
+        height * 0.035,
+        height * 0.0175
+      );
+      fillCircle(width * 0.822, height * 0.949, width * 0.024);
+      fillCircle(width * 0.915, height * 0.949, width * 0.024);
+    }
+  }
+
+  // If the user is actively dragging a caption on the canvas, show subtle alignment crosshairs
+  if (isDraggingCaption) {
+    const targetX = captionCenterX ?? width / 2;
+    const targetY = captionCenterY ?? height * 0.68;
+    const isHorizCentered = Math.abs(targetX - width / 2) <= width * 0.018;
+    const isVertCentered = Math.abs(targetY - height / 2) <= height * 0.018;
+
+    ctx.save();
+    ctx.strokeStyle = isHorizCentered ? '#24B47E' : 'rgba(255, 255, 255, 0.45)';
+    ctx.lineWidth = isHorizCentered ? 2.2 : 1.2;
+    ctx.setLineDash(isHorizCentered ? [] : [6, 6]);
     ctx.beginPath();
-    ctx.moveTo(vx, 0);
-    ctx.lineTo(vx, height);
+    ctx.moveTo(targetX, 0);
+    ctx.lineTo(targetX, height);
     ctx.stroke();
-  });
 
-  // Horizontal upper third
-  ctx.beginPath();
-  ctx.moveTo(0, height * 0.36);
-  ctx.lineTo(width, height * 0.36);
-  ctx.stroke();
-
-  // 2. Kalakar Signature Cyan Vertical Center Alignment Line (#00E5FF)
-  ctx.strokeStyle = '#00E5FF';
-  ctx.lineWidth = 2.2;
-  ctx.beginPath();
-  ctx.moveTo(width / 2, 0);
-  ctx.lineTo(width / 2, height);
-  ctx.stroke();
-
-  // 3. Kalakar Signature Yellow Horizontal Lower-Third Baseline (#FACC15)
-  ctx.strokeStyle = '#FACC15';
-  ctx.lineWidth = 2.2;
-  ctx.beginPath();
-  ctx.moveTo(0, height * 0.65);
-  ctx.lineTo(width, height * 0.65);
-  ctx.stroke();
+    ctx.strokeStyle = isVertCentered ? '#24B47E' : 'rgba(255, 255, 255, 0.45)';
+    ctx.lineWidth = isVertCentered ? 2.2 : 1.2;
+    ctx.setLineDash(isVertCentered ? [] : [6, 6]);
+    ctx.beginPath();
+    ctx.moveTo(0, targetY);
+    ctx.lineTo(width, targetY);
+    ctx.stroke();
+    ctx.restore();
+  }
 
   ctx.restore();
 }
+
 

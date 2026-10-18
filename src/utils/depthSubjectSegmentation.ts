@@ -343,7 +343,18 @@ export function renderForegroundSubjectCutoutLayer(params: {
       let offsetX = 0;
       let offsetY = 0;
 
-      if (videoRatio > canvasRatio) {
+      if (Math.abs(videoRatio - canvasRatio) <= 0.24) {
+        // Same orientation: fill canvas edge-to-edge (cover) so there are zero black bars
+        if (videoRatio > canvasRatio) {
+          drawH = canvasHeight;
+          drawW = canvasHeight * videoRatio;
+          offsetX = (canvasWidth - drawW) / 2;
+        } else {
+          drawW = canvasWidth;
+          drawH = canvasWidth / videoRatio;
+          offsetY = (canvasHeight - drawH) / 2;
+        }
+      } else if (videoRatio > canvasRatio) {
         drawW = canvasWidth;
         drawH = canvasWidth / videoRatio;
         offsetY = (canvasHeight - drawH) / 2;

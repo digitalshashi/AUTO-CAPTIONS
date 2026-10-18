@@ -79,6 +79,8 @@ export interface LineStyleOverride {
   fontFamily?: string;
   fontFace?: string;
   fontSize?: number;
+  line1FontSizePx?: number;
+  line2FontSizePx?: number;
   backgroundEnabled?: boolean;
   positionX?: number;
   positionY?: number;
@@ -92,12 +94,52 @@ export interface CaptionTrackData {
   words: WordTiming[];
 }
 
+export type BRollDisplayLayout = 'cutaway' | 'pip_card' | 'split_backdrop';
+
+export type BRollMotionPreset = 'ken_burns_zoom' | 'pan_glide' | 'portal_pop';
+
+export type BRollMagicalEffect =
+  | 'all_magic'
+  | 'gold_emerald_particles'
+  | 'light_leaks'
+  | 'aura_burst';
+
+export type BRollSfxPreset =
+  | 'magical_chime'
+  | 'cinematic_whoosh'
+  | 'bass_impact'
+  | 'none';
+
+export interface AIBRollSlot {
+  id: string;
+  slotNumber: 1 | 2 | 3;
+  title: string;
+  scriptContext: string;
+  prompt: string;
+  aspectRatio: VideoAspectRatio; // '9:16' | '1:1' | '16:9'
+  imageDataUrl?: string;
+  isGenerating?: boolean;
+  enabled: boolean;
+  linkedSegmentId?: string;
+  startTime: number;
+  endTime: number;
+  displayLayout: BRollDisplayLayout;
+  motionPreset: BRollMotionPreset;
+  magicalEffect: BRollMagicalEffect;
+  sfxPreset: BRollSfxPreset;
+}
+
 export interface CaptionSegment {
   id: string;
   startTime: number;
   endTime: number;
   tracks: Partial<Record<TrackKey, CaptionTrackData>>;
   displayLineNumber?: number;
+  // Explicit 1st Line & 2nd Line Text & Size Overrides
+  customLine1Text?: string;
+  customLine2Text?: string;
+  line1FontSizePx?: number;
+  line2FontSizePx?: number;
   // Section 5.1 & 5.2 Per-line Kalakar actions & line styling popup
   arcCurveDeg?: number; // Curve into an arch (-45 to +45, 0 = flat)
   spreadWords?: boolean; // Spread the words across the line
@@ -108,7 +150,23 @@ export interface CaptionSegment {
   brollTheme?: 'wealth' | 'mindset' | 'community' | 'tech' | 'cinema' | 'none';
   brollTitle?: string;
   brollImageUrl?: string;
+  // New Gemini AI B-Roll Slot linkage & per-caption B-Roll overrides
+  aiBrollEnabled?: boolean;
+  aiBrollSlotId?: string;
+  aiBrollAspectRatio?: VideoAspectRatio;
+  aiBrollPrompt?: string;
+  aiBrollCustomImageUrl?: string;
+  aiBrollDisplayLayout?: BRollDisplayLayout;
+  aiBrollMotionPreset?: BRollMotionPreset;
+  aiBrollMagicalEffect?: BRollMagicalEffect;
+  aiBrollSfxPreset?: BRollSfxPreset;
+  // Goldox Section 3.3: Mother / Child Line Hierarchy (Magic Wand cascading)
+  lineRole?: 'mother' | 'child' | 'none';
+  motherSegmentId?: string;
+  // Goldox Section 1.5: Manual Text Plus Layer
+  isManualTextPlus?: boolean;
 }
+
 
 
 export type AnimationType =
@@ -125,6 +183,7 @@ export type AnimationType =
 export type DisplayMode = 'single' | 'dual-stacked';
 
 export type HierarchyMode =
+  | 'lala-handwritten'
   | 'sidz-vairagya'
   | 'sidz-20k-script'
   | 'sidz-valuing-wide'
@@ -178,6 +237,12 @@ export interface VideoClipEditConfig {
   muted: boolean;
 }
 
+export interface GradientStop {
+  id: string;
+  color: string;
+  position: number; // 0 to 100
+}
+
 export interface GradientPreset {
   id: string;
   name: string;
@@ -220,6 +285,8 @@ export interface CaptionStyleConfig {
   accentScriptFontFamily?: string;
   secondaryFontFamily: string;
   fontSize: number;
+  line1FontSizePx?: number;
+  line2FontSizePx?: number;
   smallWordScale: number;
   smallLine2Scale?: number;
   bigWordScale: number;
@@ -230,7 +297,12 @@ export interface CaptionStyleConfig {
   primaryColor: string;
   highlightColor: string;
   secondaryColor: string;
+  useBaseGradient?: boolean;
+  baseGradientStops?: GradientStop[];
+  baseGradientAngle?: number;
+  baseGradientLevel?: 'word' | 'char';
   useGradient: boolean;
+  gradientStops?: GradientStop[];
   gradientPresetId: string;
   gradientStart: string;
   gradientMid: string;
@@ -325,6 +397,12 @@ export interface CaptionStyleConfig {
   lowResPreview?: boolean;
   isCanvasLocked?: boolean;
   canvasPositionLocked?: boolean;
+  unlockManipulationScope?: 'lines' | 'words' | 'stack';
+  boxPaddingLinked?: boolean;
+  templateAlignmentMode?: 'splash' | 'center';
+  transitionBouncePhysics?: 'less' | 'normal' | 'more';
+  transitionDynamicSpeed?: boolean;
+  exportResolutionTarget?: '1080p' | '4k';
   // CapCut / Premiere Pro / Photoshop Mask Studio
   maskMode: MaskMode;
   maskColor: string;
@@ -346,8 +424,19 @@ export interface CaptionStyleConfig {
   sfxVolume?: number;
   brollEnabled?: boolean;
   brollDisplayMode?: 'pip' | 'fullscreen';
-  // Real-Time AI Subject Cutout & Behind-Head Depth Masking
+  aiBrollLayout?: BRollDisplayLayout;
+  aiBrollMotionPreset?: BRollMotionPreset;
+  aiBrollMagicalEffect?: BRollMagicalEffect;
+  aiBrollSfxPreset?: BRollSfxPreset;
+  aiBrollSfxEnabled?: boolean;
+  // Real-Time AI Subject Cutout & Behind-Head Depth Masking (Disabled for now, preserved for future activation)
   captionDepthBehindSubject?: boolean;
+  // Stitch UI Compatibility Properties
+  unlockDragScope?: 'words' | 'lines' | 'stack';
+  layoutMode?: 'single' | 'two-line' | 'pyramid' | 'spotlight' | string;
+  backgroundPaddingPx?: number;
+  backgroundRadiusPx?: number;
+  backgroundEnabled?: boolean;
 }
 
 
@@ -360,6 +449,9 @@ export interface StylePreset {
   scriptPreviewText?: string;
   previewBg: string;
   isPremium?: boolean;
+  isVerifiedCreator?: boolean;
+  styleTags?: ('Bold' | 'Shadow' | 'Italic')[];
+  templateVisualKey?: string;
   category?: string;
   creatorCategory?: string;
   config: Partial<CaptionStyleConfig>;

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import {
   Sparkles,
   Type as TypeIcon,
@@ -24,15 +24,18 @@ import {
   ChevronLeft,
 } from 'lucide-react';
 import {
+  AIBRollSlot,
   AnimationType,
   AudioEnhancerConfig,
   CaptionFrameStyle,
+  CaptionSegment,
   CaptionStyleConfig,
   GradientDirection,
   GradientPreset,
   HierarchyMode,
   MaskMode,
   StylePreset,
+  VideoAspectRatio,
 } from '../types/caption';
 import {
   AVAILABLE_FONTS,
@@ -42,12 +45,18 @@ import {
 import { DEFAULT_VIDEO_CLIP_EDIT } from '../data/kalakarOptionsData';
 import {
   KalakarAiAudioTab,
+  KalakarLineStylingPanel,
   KalakarTemplatesTab,
   KalakarTextAndEffectsTab,
   KalakarTransitionsTab,
   KalakarVideoEditTab,
 } from './KalakarRightPanelTabs';
-import { VideoExportFormat } from '../utils/audioExtractor';
+import { AIBRollStudioPanel } from './AIBRollStudioPanel';
+import {
+  ExportResolution,
+  VideoExportFormat,
+  getExportResolutionDimensions,
+} from '../utils/audioExtractor';
 
 const CUSTOM_GRADIENTS_STORAGE_KEY = 'vakyareel_custom_gradients_v1';
 
@@ -75,14 +84,43 @@ interface StyleAnimationInspectorProps {
   onExportVTT: () => void;
   onExportJSON: () => void;
   onExportAudioWAV: () => void;
-  onExportAlphaOverlay?: () => void;
+  onExportAlphaOverlay?: (resolution?: ExportResolution) => void;
   onExportPremiereXML?: () => void;
-  onExportBurnedVideo: (format?: VideoExportFormat) => void;
+  onExportPremiereNativeXML?: () => void;
+  onExportDaVinciFCPXML?: () => void;
+  onExportDaVinciEDL?: () => void;
+  onExportBurnedVideo: (
+    format?: VideoExportFormat,
+    resolution?: ExportResolution
+  ) => void;
   onStopExportNow: () => void;
   exportFormat: VideoExportFormat;
   onChangeExportFormat: (format: VideoExportFormat) => void;
+  exportResolution?: ExportResolution;
+  onChangeExportResolution?: (res: ExportResolution) => void;
   isExportingVideo: boolean;
   exportProgress: number;
+  // AI Script-to-B-Roll 3-Image Studio props
+  segments?: CaptionSegment[];
+  aiBRollSlots?: AIBRollSlot[];
+  isAnalyzingBRollScript?: boolean;
+  externalOpenBRollCounter?: number;
+  onUpdateBRollSlot?: (slotId: string, partial: Partial<AIBRollSlot>) => void;
+  onAnalyzeAndGenerateAllThreeBRolls?: (aspectRatio: VideoAspectRatio) => void;
+  onRegenerateSingleBRollSlotImage?: (
+    slotId: string,
+    prompt: string,
+    aspectRatio: VideoAspectRatio
+  ) => void;
+  onLinkBRollSlotToSegment?: (slotId: string, segmentId: string) => void;
+  onSeekTo?: (time: number) => void;
+  mobileVisible?: boolean;
+  activeLineStylingSegmentId?: string | null;
+  onCloseLineStyling?: () => void;
+  onUpdateSegmentMeta?: (
+    segmentId: string,
+    partial: Partial<CaptionSegment>
+  ) => void;
 }
 
 const ANIMATION_ENGINES: {
@@ -149,23 +187,28 @@ const ANIMATION_ENGINES: {
 
 const SIDZ_LAYOUT_MODES: { id: HierarchyMode; label: string; sub: string }[] = [
   {
+    id: 'lala-handwritten',
+    label: 'Lala (Paritosh)',
+    sub: 'Caveat Ink + Red Swoosh',
+  },
+  {
     id: 'sidz-vairagya',
-    label: 'SIDZ_VAIRAGYA',
+    label: 'MER_VAIRAGYA',
     sub: 'Top-left RGB + Giant Gold',
   },
   {
     id: 'sidz-20k-script',
-    label: 'SIDZ_20K_MINT',
+    label: 'MER_20K_MINT',
     sub: '3-Tier + Script Tail',
   },
   {
     id: 'sidz-valuing-wide',
-    label: 'SIDZ_VALUING',
+    label: 'MER_VALUING',
     sub: 'Centered Wide Impact',
   },
   {
     id: 'sidz-truly-flame',
-    label: 'SIDZ_TRULY_FLAME',
+    label: 'MER_TRULY_FLAME',
     sub: 'Top Giant + Tucked Right',
   },
 ];
@@ -266,12 +309,30 @@ export const StyleAnimationInspector: React.FC<StyleAnimationInspectorProps> = (
   onExportAudioWAV,
   onExportAlphaOverlay,
   onExportPremiereXML,
+  onExportPremiereNativeXML,
+  onExportDaVinciFCPXML,
+  onExportDaVinciEDL,
   onExportBurnedVideo,
   onStopExportNow,
   exportFormat,
   onChangeExportFormat,
+  exportResolution = '1080p',
+  onChangeExportResolution,
   isExportingVideo,
   exportProgress,
+  segments = [],
+  aiBRollSlots = [],
+  isAnalyzingBRollScript = false,
+  externalOpenBRollCounter = 0,
+  onUpdateBRollSlot,
+  onAnalyzeAndGenerateAllThreeBRolls,
+  onRegenerateSingleBRollSlotImage,
+  onLinkBRollSlotToSegment,
+  onSeekTo,
+  mobileVisible = true,
+  activeLineStylingSegmentId = null,
+  onCloseLineStyling,
+  onUpdateSegmentMeta,
 }) => {
   // Section 4: Collapse arrow on the panel edge hides or shows the right panel
   const [isRightPanelCollapsed, setIsRightPanelCollapsed] = useState(false);
@@ -285,13 +346,36 @@ export const StyleAnimationInspector: React.FC<StyleAnimationInspectorProps> = (
     | 'templates48'
     | 'text-effects'
     | 'transitions'
+    | 'broll'
     | 'ai-audio'
     | 'easy'
     | 'gradients'
     | 'spacing'
     | 'mask'
     | 'export'
-  >('transitions');
+  >('text-effects');
+
+  React.useEffect(() => {
+    if (externalOpenBRollCounter > 0) {
+      setIsRightPanelCollapsed(false);
+      setTopPanelMode('captions');
+      setActiveTab('broll');
+    }
+  }, [externalOpenBRollCounter]);
+
+  React.useEffect(() => {
+    if (activeLineStylingSegmentId) {
+      setIsRightPanelCollapsed(false);
+    }
+  }, [activeLineStylingSegmentId]);
+
+  const activeLineStylingSegIndex = activeLineStylingSegmentId
+    ? segments.findIndex((s) => s.id === activeLineStylingSegmentId)
+    : -1;
+  const activeLineStylingSegment =
+    activeLineStylingSegIndex >= 0
+      ? segments[activeLineStylingSegIndex]
+      : undefined;
 
   const [customGradients, setCustomGradients] = useState<GradientPreset[]>(() => {
     try {
@@ -414,27 +498,42 @@ export const StyleAnimationInspector: React.FC<StyleAnimationInspectorProps> = (
     onUpdateStyle({ smallWordScale: next });
   };
 
-  const activeRatio = styleConfig.aspectRatio || '9:16';
-  const dynamicPanelWidthClass =
-    activeRatio === '16:9'
-      ? 'w-full lg:w-[325px] xl:w-[355px]'
-      : activeRatio === '1:1'
-      ? 'w-full lg:w-[355px] xl:w-[385px]'
-      : 'w-full lg:w-[375px] xl:w-[410px]';
+  const [rightPanelWidthPx, setRightPanelWidthPx] = useState<number>(380);
+  const isResizingRightRef = useRef<boolean>(false);
+
+  React.useEffect(() => {
+    if (mobileVisible) {
+      setIsRightPanelCollapsed(false);
+    }
+  }, [mobileVisible]);
 
   if (isRightPanelCollapsed) {
     return (
-      <aside className="order-3 lg:order-3 w-full lg:w-12 shrink-0 border-l border-white/[0.08] bg-[#141417] flex lg:flex-col items-center justify-between lg:justify-start py-2.5 px-3 lg:px-0 lg:py-4 select-none">
+      <aside
+        className={`${
+          mobileVisible ? 'flex' : 'hidden lg:flex'
+        } order-3 lg:order-3 w-full lg:w-11 shrink-0 border-l border-white/[0.08] bg-[#131315] lg:flex-col items-center justify-between lg:justify-start py-2.5 px-3 lg:px-0 lg:py-4 select-none relative z-30 overflow-visible`}
+      >
+        {/* Middle Left-Edge Expand Toggle Button */}
         <button
           type="button"
           onClick={() => setIsRightPanelCollapsed(false)}
           title="Expand Right Panel"
-          className="p-2 rounded-xl bg-[#FF5722] text-white hover:bg-[#F4511E] cursor-pointer shadow-lg flex items-center gap-1.5"
+          className="hidden lg:flex absolute -left-4 top-1/2 -translate-y-1/2 z-50 w-4 h-12 rounded-l-lg bg-[#1C1C22] hover:bg-[#10b981] border border-r-0 border-white/25 items-center justify-center text-[#10b981] hover:text-[#032b1d] cursor-pointer shadow-lg transition-colors"
+        >
+          <ChevronLeft className="w-3.5 h-3.5 stroke-[2.5]" />
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setIsRightPanelCollapsed(false)}
+          title="Expand Right Inspector Panel"
+          className="p-2 rounded-lg bg-[#10b981] text-[#032b1d] hover:bg-[#34d399] cursor-pointer shadow-lg flex items-center gap-1.5 font-bold"
         >
           <ChevronLeft className="w-4 h-4" />
           <span className="lg:hidden text-xs font-bold">Expand Style &amp; Edit Panel</span>
         </button>
-        <span className="hidden lg:block mt-4 text-[10px] font-bold text-zinc-400 [writing-mode:vertical-rl] tracking-widest uppercase">
+        <span className="hidden lg:block mt-4 text-[10px] font-bold text-[#94a3b8] [writing-mode:vertical-rl] tracking-widest uppercase">
           Captions &amp; Edit Panel
         </span>
       </aside>
@@ -443,125 +542,136 @@ export const StyleAnimationInspector: React.FC<StyleAnimationInspectorProps> = (
 
   return (
     <aside
-      className={`order-3 lg:order-3 ${dynamicPanelWidthClass} shrink-0 border-l border-white/[0.06] bg-[#131317] flex flex-col h-full select-none relative transition-[width] duration-200`}
+      style={{ '--right-panel-w': `${rightPanelWidthPx}px` } as React.CSSProperties}
+      className={`${
+        mobileVisible ? 'flex' : 'hidden lg:flex'
+      } order-3 lg:order-3 w-full lg:w-[var(--right-panel-w)] max-w-full flex-1 lg:flex-initial min-h-0 shrink-0 border-t lg:border-t-0 lg:border-l border-white/[0.06] bg-[#131315] flex-col lg:h-full overflow-visible select-none relative z-30`}
     >
-      {/* Collapse Arrow on the Panel Edge (Section 4) */}
+      {/* Dynamic Left-Edge Drag Resizer */}
+      <div
+        onMouseDown={(e) => {
+          e.preventDefault();
+          isResizingRightRef.current = true;
+          const startX = e.clientX;
+          const startW = rightPanelWidthPx;
+          const onMove = (moveEvent: MouseEvent) => {
+            if (!isResizingRightRef.current) return;
+            const deltaX = startX - moveEvent.clientX;
+            const nextW = Math.max(300, Math.min(560, startW + deltaX));
+            setRightPanelWidthPx(nextW);
+          };
+          const onUp = () => {
+            isResizingRightRef.current = false;
+            window.removeEventListener('mousemove', onMove);
+            window.removeEventListener('mouseup', onUp);
+          };
+          window.addEventListener('mousemove', onMove);
+          window.addEventListener('mouseup', onUp);
+        }}
+        onDoubleClick={() => setRightPanelWidthPx(380)}
+        title="Drag to resize Right Panel · Double-click to reset width"
+        className="hidden lg:flex absolute -left-1.5 inset-y-0 z-30 w-3 cursor-col-resize items-center justify-center group"
+      >
+        <div className="w-[2px] h-full bg-transparent group-hover:bg-[#10b981]/70 transition-colors" />
+        <div className="absolute top-1/2 -translate-y-14 w-1 h-8 rounded-full bg-white/20 group-hover:bg-[#10b981] transition-colors" />
+      </div>
+
+      {/* Prominent Minimize / Collapse Toggle Button on the Left Edge of Right Panel (Matching Screenshot 1 & 2) */}
       <button
         type="button"
         onClick={() => setIsRightPanelCollapsed(true)}
-        title="Collapse Right Panel"
-        className="hidden lg:flex absolute -left-3.5 top-1/2 -translate-y-1/2 z-30 w-3.5 h-10 rounded-l-md bg-[#1D1D24] hover:bg-[#2BAE66] border border-r-0 border-white/10 items-center justify-center text-zinc-400 hover:text-white cursor-pointer"
+        title="Minimize / Collapse Right Panel"
+        className="hidden lg:flex absolute -left-4 top-1/2 -translate-y-1/2 z-50 w-4 h-12 rounded-l-lg bg-[#1C1C22] hover:bg-[#10b981] border border-r-0 border-white/25 items-center justify-center text-zinc-200 hover:text-[#032b1d] cursor-pointer shadow-lg transition-colors"
       >
-        <ChevronRight className="w-3 h-3" />
+        <ChevronRight className="w-3.5 h-3.5 stroke-[2.5]" />
       </button>
 
-      {/* SECTION 4 & 11: TWO TOP TABS ("Captions" and "Edit") — Exact match to screenshot */}
-      <div className="px-3 pt-2.5 pb-0 border-b border-white/[0.06] space-y-2">
-        <div className="grid grid-cols-2 gap-1 bg-[#18181E] p-1 rounded-lg border border-white/[0.05]">
+      {/* Primary Top Tabs ("Captions" and "Edit") + Quick Minimize Button */}
+      <div className="p-2.5 sm:p-3 border-b border-white/[0.06] shrink-0 flex items-center gap-2">
+        <div className="flex-1 grid grid-cols-2 p-1 bg-[#1c1c1f] rounded-lg border border-white/[0.06]">
           <button
             type="button"
-            onClick={() => setTopPanelMode('captions')}
-            className={`py-1.5 rounded-md text-xs font-semibold transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+            onClick={() => {
+              onCloseLineStyling?.();
+              setTopPanelMode('captions');
+            }}
+            className={`py-1.5 text-xs font-semibold rounded-md transition-all cursor-pointer ${
               topPanelMode === 'captions'
-                ? 'bg-[#25252D] text-white shadow-sm'
-                : 'text-zinc-400 hover:text-zinc-200'
+                ? 'bg-[#26262a] text-white shadow-sm'
+                : 'font-medium text-[#94a3b8] hover:text-white'
             }`}
           >
-            <span>Captions</span>
+            Captions
           </button>
           <button
             type="button"
-            onClick={() => setTopPanelMode('edit')}
-            className={`py-1.5 rounded-md text-xs font-semibold transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+            onClick={() => {
+              onCloseLineStyling?.();
+              setTopPanelMode('edit');
+            }}
+            className={`py-1.5 text-xs font-semibold rounded-md transition-all cursor-pointer ${
               topPanelMode === 'edit'
-                ? 'bg-[#25252D] text-white shadow-sm'
-                : 'text-zinc-400 hover:text-zinc-200'
+                ? 'bg-[#26262a] text-white shadow-sm'
+                : 'font-medium text-[#94a3b8] hover:text-white'
             }`}
           >
-            <span>Edit</span>
+            Edit
           </button>
         </div>
 
-        {/* Sub-Tabs inside "Captions" Mode: Templates | Text | Transitions | AI Audio */}
-        {topPanelMode === 'captions' && (
-          <div className="space-y-1.5">
-            <div className="flex items-center justify-between border-b border-white/[0.04]">
-              {(
-                [
-                  { id: 'templates48', label: 'Templates' },
-                  { id: 'text-effects', label: 'Text' },
-                  { id: 'transitions', label: 'Transitions' },
-                  { id: 'ai-audio', label: 'AI Audio' },
-                ] as const
-              ).map((t) => {
-                const isActive = activeTab === t.id;
-                return (
-                  <button
-                    key={t.id}
-                    type="button"
-                    onClick={() => setActiveTab(t.id)}
-                    className={`py-2 px-2 text-xs font-medium transition-all cursor-pointer border-b-2 -mb-px ${
-                      isActive
-                        ? 'border-[#2BAE66] text-[#34D399] font-semibold'
-                        : 'border-transparent text-zinc-400 hover:text-zinc-200'
-                    }`}
-                  >
-                    {t.label}
-                  </button>
-                );
-              })}
+        <button
+          type="button"
+          onClick={() => setIsRightPanelCollapsed(true)}
+          title="Minimize Right Panel"
+          className="hidden lg:flex w-8 h-8 rounded-lg bg-[#1c1c1f] hover:bg-[#10b981] border border-white/10 items-center justify-center text-zinc-300 hover:text-[#032b1d] cursor-pointer transition-colors shrink-0"
+        >
+          <ChevronRight className="w-4 h-4" />
+        </button>
+      </div>
+
+      {/* Sub-Tabs inside "Captions" Mode: Text | Templates | Transitions (New) | AI Audio | Position | Colors | Mask | B-Roll | Export */}
+      {topPanelMode === 'captions' && (
+        <div className="flex items-center overflow-x-auto no-scrollbar border-b border-white/[0.06] px-2 bg-[#131315] shrink-0">
+          {(
+            [
+              { id: 'text-effects', label: 'Text', isNew: false },
+              { id: 'templates48', label: 'Templates', isNew: false },
+              { id: 'transitions', label: 'Transitions', isNew: true },
+              { id: 'ai-audio', label: 'AI Audio', isNew: false },
+              { id: 'spacing', label: 'Position', isNew: false },
+              { id: 'gradients', label: 'Colors', isNew: false },
+              { id: 'mask', label: 'Mask', isNew: false },
+              { id: 'broll', label: 'B-Roll', isNew: false },
+              { id: 'export', label: 'Export', isNew: false },
+            ] as const
+          ).map((t) => {
+            const isActive = activeTab === t.id;
+            return (
               <button
+                key={t.id}
                 type="button"
-                onClick={() => setShowProTabs((v) => !v)}
-                title="Toggle additional studio tools (Gradients, Spacing, Mask, Export)"
-                className={`px-1.5 py-0.5 rounded text-[10px] font-medium cursor-pointer transition-colors ${
-                  showProTabs
-                    ? 'bg-[#152E23] text-[#34D399] border border-[#2BAE66]/40'
-                    : 'text-zinc-500 hover:text-zinc-300'
+                onClick={() => setActiveTab(t.id)}
+                className={`px-2.5 py-2.5 text-xs font-medium border-b-2 transition-colors cursor-pointer whitespace-nowrap shrink-0 flex items-center gap-1.5 ${
+                  isActive
+                    ? 'font-semibold text-white border-[#24B47E]'
+                    : 'text-[#94a3b8] hover:text-white border-transparent'
                 }`}
               >
-                {showProTabs ? 'More ▴' : 'More ▾'}
+                <span>{t.label}</span>
+                {t.isNew && (
+                  <span className="px-1.5 py-0.5 rounded-full bg-[#132F23] text-[#34D399] border border-[#24B47E]/40 text-[9px] font-bold leading-none">
+                    New
+                  </span>
+                )}
               </button>
-            </div>
-
-            {/* Optional Extra Studio Tools Row */}
-            {showProTabs && (
-              <div className="grid grid-cols-5 gap-1 bg-[#18181E] p-1 rounded-lg mb-2">
-                {(
-                  [
-                    { id: 'easy', label: 'SIDZ', icon: Wand2 },
-                    { id: 'gradients', label: 'Gradients', icon: Palette },
-                    { id: 'spacing', label: 'Spacing', icon: Move },
-                    { id: 'mask', label: 'Mask', icon: Layers },
-                    { id: 'export', label: 'Export', icon: Download },
-                  ] as const
-                ).map((tab) => {
-                  const Icon = tab.icon;
-                  const isActive = activeTab === tab.id;
-                  return (
-                    <button
-                      key={tab.id}
-                      type="button"
-                      onClick={() => setActiveTab(tab.id)}
-                      className={`py-1 px-1 rounded text-[10px] font-medium flex items-center justify-center gap-1 transition-all cursor-pointer whitespace-nowrap shrink-0 ${
-                        isActive
-                          ? 'bg-[#25252D] text-white shadow-sm'
-                          : 'text-zinc-400 hover:text-zinc-200'
-                      }`}
-                    >
-                      <Icon className="w-2.5 h-2.5 shrink-0" />
-                      <span>{tab.label}</span>
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        )}
-      </div>
+            );
+          })}
+        </div>
+      )}
 
       {/* Inspector Body */}
       <div className="flex-1 overflow-y-auto p-3.5 space-y-4">
+        <>
         {/* TOP MODE 2: EDIT TAB (Section 11 — Video Clip Transform, Crop, Composite, Volume) */}
         {topPanelMode === 'edit' && (
           <KalakarVideoEditTab
@@ -610,6 +720,28 @@ export const StyleAnimationInspector: React.FC<StyleAnimationInspectorProps> = (
           />
         )}
 
+        {topPanelMode === 'captions' && activeTab === 'broll' && (
+          <AIBRollStudioPanel
+            segments={segments}
+            primaryTrack={styleConfig.primaryTrack}
+            styleConfig={styleConfig}
+            aiBRollSlots={aiBRollSlots}
+            isAnalyzingScript={isAnalyzingBRollScript}
+            onUpdateStyle={onUpdateStyle}
+            onUpdateSlot={(slotId, partial) => onUpdateBRollSlot?.(slotId, partial)}
+            onAnalyzeAndGenerateAllThree={(ratio) =>
+              onAnalyzeAndGenerateAllThreeBRolls?.(ratio)
+            }
+            onRegenerateSingleSlotImage={(slotId, prompt, ratio) =>
+              onRegenerateSingleBRollSlotImage?.(slotId, prompt, ratio)
+            }
+            onLinkSlotToSegment={(slotId, segmentId) =>
+              onLinkBRollSlotToSegment?.(slotId, segmentId)
+            }
+            onSeekTo={(t) => onSeekTo?.(t)}
+          />
+        )}
+
         {topPanelMode === 'captions' && activeTab === 'ai-audio' && (
           <KalakarAiAudioTab
             audioEnhancer={audioEnhancer}
@@ -650,6 +782,88 @@ export const StyleAnimationInspector: React.FC<StyleAnimationInspectorProps> = (
                   const gEnd = preset.config.gradientEnd || '#EAB308';
                   const isInverted =
                     preset.config.hierarchyMode === 'sidz-truly-flame';
+                  const isLala =
+                    preset.id === 'kalakar-lala' ||
+                    preset.name.toLowerCase() === 'lala' ||
+                    preset.config.hierarchyMode === 'lala-handwritten';
+
+                  if (isLala) {
+                    return (
+                      <button
+                        key={preset.id}
+                        type="button"
+                        onClick={() => {
+                          onApplyPreset(preset);
+                          setPresetNameDraft(preset.name);
+                          setPresetBadgeDraft(preset.badgeText);
+                        }}
+                        className={`col-span-2 rounded-2xl overflow-hidden border-2 text-left transition-all cursor-pointer bg-[#141519] shadow-lg ${
+                          isSelected
+                            ? 'border-[#2BAE66] ring-2 ring-[#2BAE66]/25'
+                            : 'border-white/10 hover:border-[#2BAE66]/60'
+                        }`}
+                      >
+                        <div className="px-3.5 py-2 bg-[#15161A] flex items-center justify-between">
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-xs font-bold text-white">
+                              {preset.name}
+                            </span>
+                            <svg
+                              viewBox="0 0 24 24"
+                              className="w-3.5 h-3.5 shrink-0"
+                              fill="none"
+                            >
+                              <circle cx="12" cy="12" r="10" fill="#0095F6" />
+                              <path
+                                d="M8.5 12.5L10.8 14.8L15.8 9.8"
+                                stroke="#FFFFFF"
+                                strokeWidth="2.2"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                              />
+                            </svg>
+                          </div>
+                          {isSelected && (
+                            <span className="w-4 h-4 rounded-full bg-[#2BAE66] flex items-center justify-center">
+                              <Check className="w-2.5 h-2.5 text-white" />
+                            </span>
+                          )}
+                        </div>
+                        <div className="h-[86px] bg-[#FAF6E8] flex flex-col items-center justify-center px-3">
+                          <span
+                            className="text-[15px] font-semibold text-[#1C434C] leading-none"
+                            style={{ fontFamily: '"Caveat", cursive' }}
+                          >
+                            {preset.smallPreviewText || 'Arey Maalik, mein houn'}
+                          </span>
+                          <span
+                            className="text-[26px] font-bold text-[#1C434C] leading-none -mt-0.5"
+                            style={{ fontFamily: '"Caveat", cursive' }}
+                          >
+                            {preset.badgeText || 'Paritosh Anand'}
+                          </span>
+                          <svg
+                            viewBox="0 0 210 18"
+                            className="w-[130px] h-[13px] -mt-0.5"
+                            fill="none"
+                          >
+                            <path
+                              d="M14 9 C 62 2, 138 2, 196 8"
+                              stroke="#EB4823"
+                              strokeWidth="3"
+                              strokeLinecap="round"
+                            />
+                            <path
+                              d="M6 14 C 64 6, 145 6, 202 12"
+                              stroke="#EB4823"
+                              strokeWidth="2.5"
+                              strokeLinecap="round"
+                            />
+                          </svg>
+                        </div>
+                      </button>
+                    );
+                  }
 
                   return (
                     <button
@@ -2679,7 +2893,56 @@ export const StyleAnimationInspector: React.FC<StyleAnimationInspectorProps> = (
                 </span>
               </div>
 
-              {/* Format Selector Pills: .MP4 | .WP2 | .WEBM */}
+              {/* Resolution Selector: 720p | 1080p | 4K */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-medium text-zinc-300">
+                    Resolution:
+                  </span>
+                  <span className="text-[10px] font-mono text-emerald-400">
+                    {
+                      getExportResolutionDimensions(
+                        exportResolution,
+                        styleConfig.aspectRatio || '9:16'
+                      ).label
+                    }
+                  </span>
+                </div>
+                <div className="grid grid-cols-3 gap-1.5 bg-[#121216] p-1 rounded-xl">
+                  {(
+                    [
+                      { id: '720p', label: '720p', sub: 'HD' },
+                      { id: '1080p', label: '1080p', sub: 'Full HD' },
+                      { id: '4k', label: '4k', sub: 'Ultra HD' },
+                    ] as { id: ExportResolution; label: string; sub: string }[]
+                  ).map((res) => {
+                    const active = exportResolution === res.id;
+                    return (
+                      <button
+                        key={res.id}
+                        type="button"
+                        onClick={() => onChangeExportResolution?.(res.id)}
+                        className={`py-2 px-2 rounded-lg text-center transition-all cursor-pointer ${
+                          active
+                            ? 'bg-[#24B47E] text-[#050505] shadow-sm font-bold'
+                            : 'text-zinc-400 hover:text-white'
+                        }`}
+                      >
+                        <div className="text-xs font-bold">{res.label}</div>
+                        <div
+                          className={`text-[9px] ${
+                            active ? 'text-[#050505]/80 font-semibold' : 'text-zinc-500'
+                          }`}
+                        >
+                          {res.sub}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Format Selector Pills: .MP4 | .MOV | .WEBM */}
               <div className="space-y-1.5">
                 <span className="text-[11px] font-medium text-zinc-300">
                   Select Video Container Format:
@@ -2688,7 +2951,7 @@ export const StyleAnimationInspector: React.FC<StyleAnimationInspectorProps> = (
                   {(
                     [
                       { id: 'mp4', label: '.MP4', sub: 'H.264 + AAC' },
-                      { id: 'wp2', label: '.WP2', sub: 'Web HD + Audio' },
+                      { id: 'mov', label: '.MOV', sub: 'QuickTime HD' },
                       { id: 'webm', label: '.WEBM', sub: 'VP9 + Opus' },
                     ] as { id: VideoExportFormat; label: string; sub: string }[]
                   ).map((fmt) => {
@@ -2719,71 +2982,69 @@ export const StyleAnimationInspector: React.FC<StyleAnimationInspectorProps> = (
               </div>
 
               {isExportingVideo && (
-                <div className="space-y-1.5">
+                <div className="space-y-2 p-3 rounded-xl bg-[#121216] border border-[#24B47E]/40">
                   <div className="flex justify-between text-xs font-mono-tabular">
-                    <span className="text-[#0A84FF]">
-                      Recording .{exportFormat.toUpperCase()} Video + Audio...
+                    <span className="text-[#34D399]">
+                      Rendering {exportResolution.toUpperCase()} .{exportFormat.toUpperCase()}...
                     </span>
-                    <span className="text-white">{exportProgress}%</span>
+                    <span className="text-white font-bold">{exportProgress}%</span>
                   </div>
-                  <div className="w-full h-2 bg-[#121216] rounded-full overflow-hidden">
+                  <div className="w-full h-2 bg-black rounded-full overflow-hidden">
                     <div
-                      className="h-full bg-[#0A84FF] transition-all duration-150"
+                      className="h-full bg-[#24B47E] transition-all duration-150"
                       style={{ width: `${exportProgress}%` }}
                     />
                   </div>
-                </div>
-              )}
-
-              {/* Direct Export Action Buttons */}
-              {!isExportingVideo ? (
-                <div className="space-y-2">
                   <button
                     type="button"
-                    onClick={() => onExportBurnedVideo('mp4')}
-                    className="w-full py-2.5 px-4 rounded-xl bg-[#0A84FF] hover:bg-[#0070E0] text-white font-semibold text-xs flex items-center justify-center gap-2 transition-colors cursor-pointer whitespace-nowrap"
+                    onClick={onStopExportNow}
+                    className="w-full py-2 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs flex items-center justify-center gap-2 transition-colors cursor-pointer"
                   >
-                    <Film className="w-4 h-4" />
-                    <span>Download .MP4 (Video + Audio)</span>
+                    <Square className="w-3.5 h-3.5 fill-white" />
+                    <span>
+                      Finish &amp; Save {exportResolution.toUpperCase()} .{exportFormat.toUpperCase()} Now ({exportProgress}%)
+                    </span>
                   </button>
-
-                  <div className="grid grid-cols-2 gap-2">
-                    <button
-                      type="button"
-                      onClick={() => onExportBurnedVideo('wp2')}
-                      className="py-2 px-3 rounded-xl bg-[#262630] hover:bg-[#32323E] border border-white/10 text-white font-semibold text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
-                    >
-                      <Download className="w-3.5 h-3.5 text-[#5AC8FA]" />
-                      <span>Download .WP2</span>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={onExportAudioWAV}
-                      className="py-2 px-3 rounded-xl bg-[#262630] hover:bg-[#32323E] border border-white/10 text-white font-semibold text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
-                    >
-                      <Volume2 className="w-3.5 h-3.5 text-[#30D158]" />
-                      <span>Audio Only (.WAV)</span>
-                    </button>
-                  </div>
                 </div>
-              ) : (
+              )}
+
+              {/* Direct Video Export Action Buttons (720p / 1080p / 4K) */}
+              <div className="space-y-2">
                 <button
                   type="button"
-                  onClick={onStopExportNow}
-                  className="w-full py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs flex items-center justify-center gap-2 transition-colors cursor-pointer"
+                  onClick={() =>
+                    onExportBurnedVideo(exportFormat, exportResolution)
+                  }
+                  className="w-full py-2.5 px-4 rounded-xl bg-[#24B47E] hover:bg-[#199A68] text-[#050505] font-bold text-xs flex items-center justify-center gap-2 transition-colors cursor-pointer whitespace-nowrap"
                 >
-                  <Square className="w-3.5 h-3.5 fill-white" />
+                  <Film className="w-4 h-4" />
                   <span>
-                    Finish & Save .{exportFormat.toUpperCase()} Now ({exportProgress}%)
+                    Render {exportResolution.toUpperCase()} .{exportFormat.toUpperCase()} Video + Audio
                   </span>
                 </button>
-              )}
+
+                <div className="grid grid-cols-3 gap-1.5">
+                  {(['720p', '1080p', '4k'] as ExportResolution[]).map((res) => (
+                    <button
+                      key={res}
+                      type="button"
+                      onClick={() => {
+                        onChangeExportResolution?.(res);
+                        onExportBurnedVideo(exportFormat, res);
+                      }}
+                      className="py-1.5 px-2 rounded-lg bg-[#262630] hover:bg-[#32323E] border border-white/10 text-white font-semibold text-[11px] flex items-center justify-center gap-1 transition-colors cursor-pointer"
+                    >
+                      <Download className="w-3 h-3 text-[#34D399]" />
+                      <span>{res.toUpperCase()}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
             </div>
 
             <div className="space-y-2">
               <h3 className="text-xs font-semibold text-zinc-300">
-                Subtitle Files (For Premiere Pro / Final Cut / CapCut)
+                Subtitles, Premiere Pro &amp; DaVinci Resolve Files
               </h3>
 
               <button
@@ -2798,12 +3059,117 @@ export const StyleAnimationInspector: React.FC<StyleAnimationInspectorProps> = (
                       Download .SRT Subtitles
                     </div>
                     <div className="text-[11px] text-zinc-400">
-                      Imports directly into Adobe Premiere Pro
+                      Imports directly into Premiere Pro, DaVinci &amp; CapCut
                     </div>
                   </div>
                 </div>
                 <span className="text-xs font-mono-tabular text-zinc-400">.srt</span>
               </button>
+
+              {onExportPremiereNativeXML && (
+                <button
+                  type="button"
+                  onClick={onExportPremiereNativeXML}
+                  className="w-full p-3.5 rounded-2xl bg-[#1C1C22] hover:bg-[#25252D] border border-purple-500/30 flex items-center justify-between transition-colors cursor-pointer"
+                >
+                  <div className="flex items-center gap-2.5 text-left">
+                    <FileCode className="w-4 h-4 text-purple-400" />
+                    <div>
+                      <div className="text-xs font-semibold text-white">
+                        Export Adobe Premiere Pro Sequence (.XML)
+                      </div>
+                      <div className="text-[11px] text-zinc-400">
+                        Native Premiere Pro XMEML sequence ({exportResolution.toUpperCase()})
+                      </div>
+                    </div>
+                  </div>
+                  <span className="text-xs font-mono-tabular text-purple-400">.xml</span>
+                </button>
+              )}
+
+              {onExportPremiereXML && (
+                <button
+                  type="button"
+                  onClick={onExportPremiereXML}
+                  className="w-full p-3.5 rounded-2xl bg-[#1C1C22] hover:bg-[#25252D] border border-[#F59E0B]/30 flex items-center justify-between transition-colors cursor-pointer"
+                >
+                  <div className="flex items-center gap-2.5 text-left">
+                    <FileCode className="w-4 h-4 text-[#F59E0B]" />
+                    <div>
+                      <div className="text-xs font-semibold text-white">
+                        Export Premiere Pro / Final Cut (.FCPXML)
+                      </div>
+                      <div className="text-[11px] text-zinc-400">
+                        NLE timeline with synced subtitle tracks ({exportResolution.toUpperCase()})
+                      </div>
+                    </div>
+                  </div>
+                  <span className="text-xs font-mono-tabular text-[#F59E0B]">.fcpxml</span>
+                </button>
+              )}
+
+              {onExportDaVinciFCPXML && (
+                <button
+                  type="button"
+                  onClick={onExportDaVinciFCPXML}
+                  className="w-full p-3.5 rounded-2xl bg-[#1C1C22] hover:bg-[#25252D] border border-sky-500/30 flex items-center justify-between transition-colors cursor-pointer"
+                >
+                  <div className="flex items-center gap-2.5 text-left">
+                    <FileCode className="w-4 h-4 text-sky-400" />
+                    <div>
+                      <div className="text-xs font-semibold text-white">
+                        Export DaVinci Resolve Timeline (.FCPXML)
+                      </div>
+                      <div className="text-[11px] text-zinc-400">
+                        DaVinci Resolve 18/19 timeline &amp; text generators ({exportResolution.toUpperCase()})
+                      </div>
+                    </div>
+                  </div>
+                  <span className="text-xs font-mono-tabular text-sky-400">.fcpxml</span>
+                </button>
+              )}
+
+              {onExportDaVinciEDL && (
+                <button
+                  type="button"
+                  onClick={onExportDaVinciEDL}
+                  className="w-full p-3.5 rounded-2xl bg-[#1C1C22] hover:bg-[#25252D] border border-sky-500/30 flex items-center justify-between transition-colors cursor-pointer"
+                >
+                  <div className="flex items-center gap-2.5 text-left">
+                    <FileCode className="w-4 h-4 text-sky-300" />
+                    <div>
+                      <div className="text-xs font-semibold text-white">
+                        Export DaVinci Resolve Markers (.EDL)
+                      </div>
+                      <div className="text-[11px] text-zinc-400">
+                        CMX 3600 EDL timeline &amp; Resolve subtitle markers
+                      </div>
+                    </div>
+                  </div>
+                  <span className="text-xs font-mono-tabular text-sky-300">.edl</span>
+                </button>
+              )}
+
+              {onExportAlphaOverlay && (
+                <button
+                  type="button"
+                  onClick={() => onExportAlphaOverlay(exportResolution)}
+                  className="w-full p-3.5 rounded-2xl bg-[#1C1C22] hover:bg-[#25252D] border border-[#38BDF8]/30 flex items-center justify-between transition-colors cursor-pointer"
+                >
+                  <div className="flex items-center gap-2.5 text-left">
+                    <Layers className="w-4 h-4 text-[#38BDF8]" />
+                    <div>
+                      <div className="text-xs font-semibold text-white">
+                        Export Transparent Alpha Overlay (.WEBM)
+                      </div>
+                      <div className="text-[11px] text-zinc-400">
+                        Transparent caption track ({exportResolution.toUpperCase()}) for Premiere &amp; DaVinci
+                      </div>
+                    </div>
+                  </div>
+                  <span className="text-xs font-mono-tabular text-[#38BDF8]">alpha</span>
+                </button>
+              )}
 
               <button
                 type="button"
@@ -2817,7 +3183,7 @@ export const StyleAnimationInspector: React.FC<StyleAnimationInspectorProps> = (
                       Download .VTT Captions
                     </div>
                     <div className="text-[11px] text-zinc-400">
-                      WebVTT format for YouTube & Instagram
+                      WebVTT format for YouTube &amp; Instagram
                     </div>
                   </div>
                 </div>
@@ -2843,50 +3209,43 @@ export const StyleAnimationInspector: React.FC<StyleAnimationInspectorProps> = (
                 <span className="text-xs font-mono-tabular text-zinc-400">.json</span>
               </button>
 
-              {onExportAlphaOverlay && (
-                <button
-                  type="button"
-                  onClick={onExportAlphaOverlay}
-                  className="w-full p-3.5 rounded-2xl bg-[#1C1C22] hover:bg-[#25252D] border border-[#38BDF8]/30 flex items-center justify-between transition-colors cursor-pointer"
-                >
-                  <div className="flex items-center gap-2.5 text-left">
-                    <Layers className="w-4 h-4 text-[#38BDF8]" />
-                    <div>
-                      <div className="text-xs font-semibold text-white">
-                        Export Transparent Alpha Overlay (.WEBM)
-                      </div>
-                      <div className="text-[11px] text-zinc-400">
-                        Transparent caption track for Premiere Pro &amp; DaVinci Resolve
-                      </div>
+              <button
+                type="button"
+                onClick={onExportAudioWAV}
+                className="w-full p-3.5 rounded-2xl bg-[#1C1C22] hover:bg-[#25252D] border border-white/[0.06] flex items-center justify-between transition-colors cursor-pointer"
+              >
+                <div className="flex items-center gap-2.5 text-left">
+                  <Volume2 className="w-4 h-4 text-[#30D158]" />
+                  <div>
+                    <div className="text-xs font-semibold text-white">
+                      Download Standalone Audio (.WAV)
+                    </div>
+                    <div className="text-[11px] text-zinc-400">
+                      Studio PCM WAV audio track
                     </div>
                   </div>
-                  <span className="text-xs font-mono-tabular text-[#38BDF8]">alpha</span>
-                </button>
-              )}
-
-              {onExportPremiereXML && (
-                <button
-                  type="button"
-                  onClick={onExportPremiereXML}
-                  className="w-full p-3.5 rounded-2xl bg-[#1C1C22] hover:bg-[#25252D] border border-[#F59E0B]/30 flex items-center justify-between transition-colors cursor-pointer"
-                >
-                  <div className="flex items-center gap-2.5 text-left">
-                    <FileCode className="w-4 h-4 text-[#F59E0B]" />
-                    <div>
-                      <div className="text-xs font-semibold text-white">
-                        Export Premiere Pro / DaVinci XML (.FCPXML)
-                      </div>
-                      <div className="text-[11px] text-zinc-400">
-                        Native NLE timeline with synced Desi subtitle tracks
-                      </div>
-                    </div>
-                  </div>
-                  <span className="text-xs font-mono-tabular text-[#F59E0B]">.fcpxml</span>
-                </button>
-              )}
+                </div>
+                <span className="text-xs font-mono-tabular text-zinc-400">.wav</span>
+              </button>
             </div>
           </div>
         )}
+        </>
+      </div>
+
+      {/* Sticky Bottom Export Bar (Matches Screenshots 1 & 4) */}
+      <div className="px-3.5 py-2.5 border-t border-white/[0.06] bg-[#131315] shrink-0 flex items-center justify-end">
+        <button
+          type="button"
+          onClick={() => {
+            setTopPanelMode('captions');
+            setActiveTab('export');
+            onExportBurnedVideo(exportFormat, exportResolution);
+          }}
+          className="px-4 py-1.5 rounded-lg bg-[#389E74] hover:bg-[#2F8A64] text-white text-xs font-bold shadow-md transition-colors cursor-pointer whitespace-nowrap shrink-0"
+        >
+          {isExportingVideo ? `Exporting (${exportProgress}%)` : 'Export'}
+        </button>
       </div>
     </aside>
   );

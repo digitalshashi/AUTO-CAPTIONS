@@ -6,6 +6,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI, Type } from '@google/genai';
 import type { GenerateContentParameters, GenerateContentResponse } from '@google/genai';
+import { transliterateIndicToRoman } from './src/utils/indicRomanTransliterator';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -700,7 +701,8 @@ async function startServer() {
         chunkStartTime = 0,
         sourceLanguageHint = 'auto',
         autoHeroNLP = true,
-        autoEmojis = true,
+        autoEmojis = false,
+        removePunctuation = false,
         speechWindows = [],
       } = req.body || {};
 
@@ -708,6 +710,22 @@ async function startServer() {
         res.status(400).json({ error: 'Missing mediaBase64 payload for caption generation.' });
         return;
       }
+
+      const shouldIncludeEmojis = Boolean(autoEmojis);
+      const shouldStripPunct = Boolean(removePunctuation);
+      const stripServerText = (str: string): string => {
+        let out = str || '';
+        if (!shouldIncludeEmojis) {
+          out = out.replace(
+            /(\p{Extended_Pictographic}|\p{Emoji_Presentation}|[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{1F1E6}-\u{1F1FF}\u{FE00}-\u{FE0F}\u{200D}\u{20E3}])/gu,
+            ''
+          );
+        }
+        if (shouldStripPunct) {
+          out = out.replace(/[.,!?;:'"“”‘’()[\]{}\-—–…]/g, '');
+        }
+        return out.replace(/\s{2,}/g, ' ').trim();
+      };
 
       const startOffset = Math.max(0, Number(chunkStartTime) || 0);
       const clipDuration = Math.max(1, Number(duration) || 12);
@@ -720,12 +738,12 @@ async function startServer() {
 
       const languageHintInstruction =
         sourceLanguageHint && sourceLanguageHint !== 'auto'
-          ? `User-selected language/script hint: ${sourceLanguageHint}.`
-          : `Automatically detect the exact spoken language (e.g. Telugu, English, Hindi, Tamil, Kannada, Malayalam, Hinglish, Tinglish, etc.).`;
+          ? `User-selected language/script hint: ${sourceLanguageHint}. CRITICAL: For "fullVerbatimTranscript" and "verbatimRoman", you MUST write 100% in phonetic Roman script (English Latin alphabet A-Z, e.g., Tinglish like "Edho chusthuna, kani em telidam ledhu"). NEVER output native Telugu (తెలుగు) or Indic Unicode characters inside "verbatimRoman" or "fullVerbatimTranscript"!`
+          : `Automatically detect the spoken language and ALWAYS write "fullVerbatimTranscript" and "verbatimRoman" 100% in phonetic Roman script (English Latin alphabet A-Z, e.g., Tinglish / Hinglish). NEVER output native Telugu (తెలుగు) or Indic Unicode script inside "verbatimRoman" or "fullVerbatimTranscript"!`;
 
-      const emojiInstruction = autoEmojis
+      const emojiInstruction = shouldIncludeEmojis
         ? `Insert a relevant emoji directly after concrete nouns/concepts where natural (for example: "paisalu 💰", "roopaayalu 💵", "time ⏰", "friends 👥", "fire 🔥", "money 💸", "heart ❤️").`
-        : `Do not insert extra emojis.`;
+        : `CRITICAL: Do NOT insert or output ANY emojis anywhere in fullVerbatimTranscript, verbatimRoman, verbatimNative, or englishMeaning. Output 100% plain words with ZERO emojis.`;
 
       const vadHint =
         validSpeechWindows.length > 0
@@ -738,22 +756,22 @@ async function startServer() {
           : '';
 
       const systemPrompt = `You are Merupify & Kalakar Studio's 100% Verbatim Word-by-Word Speech-to-Text (ASR) Engine.
-CRITICAL VERBATIM TRANSCRIPTION RULES:
+CRITICAL VERBATIM TRANSCRIPTION & ROMAN (TINGLISH) SCRIPT RULES:
 1. Listen to the entire audio/video from 0.0s right through to the very end (${clipDuration.toFixed(
         1
       )}s) and transcribe 100% VERBATIM EVERY SINGLE SPOKEN WORD.
-2. First, write the complete, uninterrupted word-for-word transcript of the entire clip in "fullVerbatimTranscript" (in phonetic Roman script / English alphabet). Do NOT skip, summarize, paraphrase, or drop a single word from the beginning, middle, or end of the audio!
-3. Next, break that exact full verbatim transcript into sequential, punchy caption segments of 2 to 4 words per segment in "segments" so that EVERY SINGLE WORD from "fullVerbatimTranscript" is included in exact spoken order.
+2. First, write the complete, uninterrupted word-for-word transcript of the entire clip in "fullVerbatimTranscript" STRICTLY in phonetic Roman script / English Latin alphabet (e.g., Tinglish like "Nuvvu ee video chusthunnappudu prathi second"). NEVER use native Telugu (తెలుగు) script in "fullVerbatimTranscript"!
+3. Next, break that exact full verbatim transcript into sequential, punchy caption segments of 2 to 4 words per segment in "segments" so that EVERY SINGLE WORD from "fullVerbatimTranscript" is included in exact spoken order without repeating any phrase.
 4. Set each segment's startTime and endTime (in seconds relative to 0.0s of this clip) to when those words are spoken, covering the full spoken duration up to ${clipDuration.toFixed(
         1
       )}s without bunching timestamps or leaving artificial gaps.
 5. For each segment in "segments", provide:
-   - verbatimRoman: The exact spoken words in Roman/English script (e.g. Tinglish, Hinglish, Tanglish, or English). Wrap the 1 most impactful word in *asterisks*.
-   - verbatimNative: The exact spoken words in the language's native script (e.g. Telugu, Hindi, Tamil, or English if spoken in English), wrapping the 1 most impactful word in *asterisks*.
+   - verbatimRoman: STRICTLY in Roman/English Latin alphabet ONLY (Tinglish, Hinglish, Tanglish, or English — e.g. "chusthunnappudu prathi second", "manandaram chudalsina video idhi", "poorthiga chuseyandi"). NEVER write native Telugu (తెలుగు) characters in verbatimRoman! Wrap the 1 most impactful word in *asterisks*.
+   - verbatimNative: The exact spoken words in the language's native script (e.g. Telugu తెలుగు, Hindi, Tamil, or English if spoken in English), wrapping the 1 most impactful word in *asterisks*.
    - englishMeaning: Exact English words if spoken in English, or accurate English translation.
-   - emphasizedWord: The single most emphasized word in the segment (without asterisks).
+   - emphasizedWord: The single most emphasized word in the segment in Roman script (without asterisks).
 6. ${languageHintInstruction}
-7. ${emojiInstruction}`;
+7. ${emojiInstruction} ${vadHint}`;
 
       let rawSegments: Record<string, unknown>[] = [];
       let fullVerbatimTranscript = '';
@@ -768,7 +786,7 @@ CRITICAL VERBATIM TRANSCRIPTION RULES:
           fullVerbatimTranscript: {
             type: Type.STRING,
             description:
-              'Complete 100% word-for-word transcript of every single spoken word from 0.0s to the end of the audio clip.',
+              'Complete 100% word-for-word transcript of every spoken word strictly in phonetic Roman/Latin alphabet (Tinglish/Hinglish/English). Never use native Telugu/Indic Unicode script here.',
           },
           segments: {
             type: Type.ARRAY,
@@ -777,7 +795,11 @@ CRITICAL VERBATIM TRANSCRIPTION RULES:
               properties: {
                 startTime: { type: Type.NUMBER },
                 endTime: { type: Type.NUMBER },
-                verbatimRoman: { type: Type.STRING },
+                verbatimRoman: {
+                  type: Type.STRING,
+                  description:
+                    'Spoken words strictly in Roman/Latin alphabet (Tinglish/Hinglish/English). Never use native Telugu/Indic script here.',
+                },
                 verbatimNative: { type: Type.STRING },
                 englishMeaning: { type: Type.STRING },
                 emphasizedWord: { type: Type.STRING },
@@ -811,7 +833,7 @@ CRITICAL VERBATIM TRANSCRIPTION RULES:
                     1
                   )}s audio clip from 0.0s to ${clipDuration.toFixed(
                     1
-                  )}s. First output the complete word-for-word transcript in "fullVerbatimTranscript", then split every single word into sequential 2-to-4 word caption lines in "segments" with accurate startTime and endTime timestamps spanning the full speech duration. Never skip any word! ${languageHintInstruction} ${emojiInstruction}`,
+                  )}s. Write "fullVerbatimTranscript" and every segment's "verbatimRoman" STRICTLY in phonetic Roman English alphabet (Tinglish/Hinglish/English) — NEVER use native Telugu (తెలుగు) Unicode characters in "verbatimRoman"! Split every single word into sequential 2-to-4 word caption lines in "segments" with accurate startTime and endTime timestamps spanning the full speech duration without repeating lines. ${languageHintInstruction} ${emojiInstruction}`,
                 },
               ],
             },
@@ -836,7 +858,9 @@ CRITICAL VERBATIM TRANSCRIPTION RULES:
           detectedLanguage = parsed.detectedLanguage;
         }
         if (typeof parsed.fullVerbatimTranscript === 'string') {
-          fullVerbatimTranscript = parsed.fullVerbatimTranscript.trim();
+          fullVerbatimTranscript = stripServerText(
+            transliterateIndicToRoman(parsed.fullVerbatimTranscript.trim())
+          );
         }
         if (Array.isArray(parsed.segments) && parsed.segments.length > 0) {
           rawSegments = parsed.segments;
@@ -845,8 +869,9 @@ CRITICAL VERBATIM TRANSCRIPTION RULES:
         // Handled gracefully by fallback below
       }
 
-      // Completeness Verification: Ensure 100% of words from fullVerbatimTranscript exist in rawSegments!
-      if (fullVerbatimTranscript) {
+      // Completeness Verification: Only rebuild from fullVerbatimTranscript if rawSegments is empty,
+      // so we NEVER append duplicate native-script trailing lines when segments already exist!
+      if (rawSegments.length === 0 && fullVerbatimTranscript) {
         const stripClean = (s: string) =>
           s
             .replace(/[*.,!?;:'"“”‘’()[\]{}\-]/g, '')
@@ -855,35 +880,18 @@ CRITICAL VERBATIM TRANSCRIPTION RULES:
         const fullWords = fullVerbatimTranscript
           .split(/\s+/)
           .filter((w) => stripClean(w).length > 0);
-        const segWordsCount = rawSegments.reduce((acc, seg) => {
-          const txt = String(seg.verbatimRoman || seg.englishMeaning || '').trim();
-          const wc = txt ? txt.split(/\s+/).filter(Boolean).length : 0;
-          return acc + wc;
-        }, 0);
 
-        // If rawSegments is empty or missed > 15% of the words in fullVerbatimTranscript,
-        // rebuild or append the missing words from fullVerbatimTranscript so ZERO words are lost!
-        if (rawSegments.length === 0 && fullWords.length > 0) {
+        if (fullWords.length > 0) {
           const chunkSize = 3;
           for (let i = 0; i < fullWords.length; i += chunkSize) {
-            const phrase = fullWords.slice(i, i + chunkSize).join(' ');
+            const phrase = transliterateIndicToRoman(
+              fullWords.slice(i, i + chunkSize).join(' ')
+            );
             rawSegments.push({
               startTime: (i / fullWords.length) * clipDuration,
-              endTime: (Math.min(fullWords.length, i + chunkSize) / fullWords.length) * clipDuration,
-              verbatimRoman: phrase,
-              verbatimNative: phrase,
-              englishMeaning: phrase,
-            });
-          }
-        } else if (fullWords.length > segWordsCount + 2) {
-          // Append the remaining trailing words from fullVerbatimTranscript that were left out of segments
-          const missingWords = fullWords.slice(segWordsCount);
-          const chunkSize = 3;
-          for (let i = 0; i < missingWords.length; i += chunkSize) {
-            const phrase = missingWords.slice(i, i + chunkSize).join(' ');
-            rawSegments.push({
-              startTime: clipDuration * 0.85,
-              endTime: clipDuration,
+              endTime:
+                (Math.min(fullWords.length, i + chunkSize) / fullWords.length) *
+                clipDuration,
               verbatimRoman: phrase,
               verbatimNative: phrase,
               englishMeaning: phrase,
@@ -900,15 +908,25 @@ CRITICAL VERBATIM TRANSCRIPTION RULES:
         return;
       }
 
-      // Split any overly long segment (> 5 words) into crisp 3-word reel caption lines before forced alignment
+      // Split any overly long segment (> 5 words) into crisp 3-word reel caption lines before forced alignment,
+      // and strictly transliterate any Indic Unicode in verbatimRoman into phonetic Roman (Tinglish)!
       const normalizedRawSegments: Record<string, unknown>[] = [];
       for (const seg of rawSegments) {
-        const romanTxt = String(
-          seg.verbatimRoman || seg.tinglish || seg.hinglish || seg.englishMeaning || ''
+        const rawRomanCandidate = String(
+          seg.verbatimRoman ||
+            seg.tinglish ||
+            seg.hinglish ||
+            seg.verbatimNative ||
+            seg.englishMeaning ||
+            ''
         ).trim();
+        const romanTxt = transliterateIndicToRoman(rawRomanCandidate);
         const words = romanTxt.split(/\s+/).filter(Boolean);
         if (words.length <= 5) {
-          normalizedRawSegments.push(seg);
+          normalizedRawSegments.push({
+            ...seg,
+            verbatimRoman: romanTxt,
+          });
         } else {
           const nativeWords = String(seg.verbatimNative || romanTxt)
             .trim()
@@ -1016,39 +1034,65 @@ CRITICAL VERBATIM TRANSCRIPTION RULES:
         }
       }
 
-      // Compute final aligned intervals: blend syllable-weighted acoustic alignment with valid model timings
+      // Compute final aligned intervals: distribute syllable weights across active VAD speech windows (skipping silence gaps!)
+      // and preserve exact spoken phrase boundaries at 0.001s millisecond resolution
+      const activeWindows =
+        validSpeechWindows.length > 0
+          ? validSpeechWindows
+          : [{ start: speechStart, end: speechEnd }];
+      const totalVoicedDuration = Math.max(
+        0.5,
+        activeWindows.reduce((acc, w) => acc + Math.max(0.05, w.end - w.start), 0)
+      );
+
+      // Helper to map a cumulative voiced-time offset [0..totalVoicedDuration] to real clip timestamp
+      const mapVoicedTimeToClipTime = (voicedSec: number): number => {
+        let rem = Math.max(0, voicedSec);
+        for (let wIdx = 0; wIdx < activeWindows.length; wIdx++) {
+          const w = activeWindows[wIdx];
+          const wDur = Math.max(0.05, w.end - w.start);
+          if (rem <= wDur || wIdx === activeWindows.length - 1) {
+            return Math.min(w.end, w.start + rem);
+          }
+          rem -= wDur;
+        }
+        return speechEnd;
+      };
+
       const relIntervals: { start: number; end: number }[] = [];
-      let weightCursor = speechStart;
+      let voicedCursor = 0;
 
       for (let i = 0; i < count; i++) {
-        const weightedDur = (segWeights[i] / totalWeight) * activeSpeechSpan;
-        const acousticStart = weightCursor;
+        const weightedVoicedDur = (segWeights[i] / totalWeight) * totalVoicedDuration;
+        const acousticStart = mapVoicedTimeToClipTime(voicedCursor);
+        voicedCursor += weightedVoicedDur;
         const acousticEnd =
           i === count - 1
             ? speechEnd
-            : Math.min(speechEnd, weightCursor + weightedDur);
-        weightCursor = acousticEnd;
+            : Math.max(acousticStart + 0.22, mapVoicedTimeToClipTime(voicedCursor));
 
         if (hasBunchingOrGaps) {
+          const prevEnd = i > 0 ? relIntervals[i - 1].end : 0;
+          const cleanStart = Math.max(prevEnd, acousticStart);
+          const cleanEnd = Math.max(cleanStart + 0.22, acousticEnd);
           relIntervals.push({
-            start: Number(acousticStart.toFixed(2)),
-            end: Number(Math.max(acousticStart + 0.25, acousticEnd).toFixed(2)),
+            start: Number(cleanStart.toFixed(3)),
+            end: Number(cleanEnd.toFixed(3)),
           });
         } else {
-          // Smoothly blend 65% acoustic syllable alignment + 35% model timestamp so words never bunch
+          // Trust 88% model spoken timestamp + 12% VAD-windowed syllable anchor, preserving natural inter-phrase pauses!
           const m = rawRelIntervals[i];
-          const blendedStart =
-            i === 0
-              ? Math.max(0, Math.min(m.start, acousticStart + 0.3))
-              : relIntervals[i - 1].end;
-          const rawBlendedEnd = acousticEnd * 0.65 + m.end * 0.35;
+          const prevEnd = i > 0 ? relIntervals[i - 1].end : 0;
+          const rawStart = m.start * 0.88 + acousticStart * 0.12;
+          const blendedStart = Math.max(prevEnd, rawStart);
+          const rawEnd = m.end * 0.88 + acousticEnd * 0.12;
           const blendedEnd =
             i === count - 1
-              ? Math.max(blendedStart + 0.3, Math.max(m.end, speechEnd))
-              : Math.max(blendedStart + 0.3, Math.min(clipDuration, rawBlendedEnd));
+              ? Math.max(blendedStart + 0.24, Math.min(clipDuration, Math.max(m.end, speechEnd)))
+              : Math.max(blendedStart + 0.22, Math.min(clipDuration, rawEnd));
           relIntervals.push({
-            start: Number(blendedStart.toFixed(2)),
-            end: Number(blendedEnd.toFixed(2)),
+            start: Number(blendedStart.toFixed(3)),
+            end: Number(blendedEnd.toFixed(3)),
           });
         }
       }
@@ -1064,30 +1108,38 @@ CRITICAL VERBATIM TRANSCRIPTION RULES:
             start: (index / count) * clipDuration,
             end: ((index + 1) / count) * clipDuration,
           };
-          const start = Number((startOffset + interval.start).toFixed(2));
-          const end = Number(Math.max(start + 0.25, startOffset + interval.end).toFixed(2));
+          const start = Number((startOffset + interval.start).toFixed(3));
+          const end = Number(Math.max(start + 0.22, startOffset + interval.end).toFixed(3));
 
-          const emphWord = seg.emphasizedWord ? String(seg.emphasizedWord).trim() : '';
+          const rawEmphWord = seg.emphasizedWord ? String(seg.emphasizedWord).trim() : '';
+          const emphWord = transliterateIndicToRoman(rawEmphWord);
           const segHeroKeywords = emphWord
             ? [emphWord]
             : Array.isArray(seg.heroKeywords)
-            ? seg.heroKeywords.map((k) => String(k))
+            ? seg.heroKeywords.map((k) => transliterateIndicToRoman(String(k)))
             : [];
 
-          const verbatimRoman = String(
+          const rawVerbatimRoman = String(
             seg.verbatimRoman ||
               seg.tinglish ||
               seg.hinglish ||
+              seg.verbatimNative ||
               seg.englishMeaning ||
               seg.english ||
               ''
           ).trim();
-          const verbatimNative = String(
-            seg.verbatimNative || seg.telugu || seg.hindi || seg.tamil || verbatimRoman
-          ).trim();
-          const englishMeaning = String(
-            seg.englishMeaning || seg.english || verbatimRoman
-          ).trim();
+          // Strictly guarantee 100% Roman script (Tinglish/Hinglish) with zero native Telugu/Indic Unicode characters, and enforce emoji/punctuation settings
+          const verbatimRoman = stripServerText(transliterateIndicToRoman(rawVerbatimRoman));
+          const verbatimNative = stripServerText(
+            String(
+              seg.verbatimNative || seg.telugu || seg.hindi || seg.tamil || verbatimRoman
+            ).trim()
+          );
+          const englishMeaning = stripServerText(
+            transliterateIndicToRoman(
+              String(seg.englishMeaning || seg.english || verbatimRoman).trim()
+            )
+          );
 
           const romanWords = buildWordTimings(
             verbatimRoman,
@@ -1102,7 +1154,7 @@ CRITICAL VERBATIM TRANSCRIPTION RULES:
             verbatimNative,
             start,
             end,
-            segHeroKeywords,
+            rawEmphWord ? [rawEmphWord] : segHeroKeywords,
             Boolean(autoHeroNLP)
           );
           const nativeClean = nativeWords.map((w) => w.word).join(' ');
@@ -1417,6 +1469,169 @@ Return a JSON object with:
       res.status(200).json({
         summary: 'Applied smart Kalakar preset configuration for maximum visual clarity.',
         fallbackLocalAgent: true,
+      });
+    }
+  });
+
+  // Gemini AI Script-to-B-Roll 3-Scene Planner Endpoint (Analyzes created captions & selects 3 optimal B-Roll scenes)
+  app.post('/api/broll/analyze-script', async (req, res) => {
+    try {
+      const { segments = [], defaultAspectRatio = '9:16' } = req.body;
+      if (!Array.isArray(segments) || segments.length === 0) {
+        res.status(400).json({ error: 'No caption segments provided for B-Roll analysis.' });
+        return;
+      }
+
+      const compactTranscript = segments.map(
+        (
+          s: {
+            id: string;
+            startTime: number;
+            endTime: number;
+            text?: string;
+          },
+          i: number
+        ) => ({
+          index: i + 1,
+          id: s.id,
+          startTime: Number((s.startTime || 0).toFixed(2)),
+          endTime: Number((s.endTime || 0).toFixed(2)),
+          text: String(s.text || ''),
+        })
+      );
+
+      const response = await generateContentResilient(
+        {
+          contents: `Analyze this short-form video caption script and plan exactly THREE (3) contextually apt, cinematic AI B-Roll image scenes distributed across the video (Scene 1: Early Hook, Scene 2: Mid-Video Core Concept, Scene 3: Climax / Takeaway).
+For each of the 3 scenes, pick the best matching caption segment ID from the input list, write a vivid, photorealistic, high-contrast visual image generation prompt (no text inside the image) that illustrates what the speaker is talking about in that moment, and recommend an entrance animation and magical effect.
+
+Caption Script:
+${JSON.stringify(compactTranscript)}`,
+          config: {
+            systemInstruction:
+              'You are an award-winning short-form video director and AI visual art director. Plan exactly 3 distinct, visually stunning B-Roll scenes that directly match the spoken script.',
+            temperature: 0.35,
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                scenes: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      slotNumber: { type: Type.INTEGER },
+                      title: { type: Type.STRING },
+                      scriptContext: { type: Type.STRING },
+                      prompt: { type: Type.STRING },
+                      linkedSegmentId: { type: Type.STRING },
+                      startTime: { type: Type.NUMBER },
+                      endTime: { type: Type.NUMBER },
+                      motionPreset: { type: Type.STRING },
+                      magicalEffect: { type: Type.STRING },
+                      sfxPreset: { type: Type.STRING },
+                    },
+                    required: [
+                      'slotNumber',
+                      'title',
+                      'scriptContext',
+                      'prompt',
+                      'linkedSegmentId',
+                    ],
+                  },
+                },
+              },
+              required: ['scenes'],
+            },
+          },
+        },
+        TEXT_MODEL_CHAIN
+      );
+
+      const parsed = safeParseJSON<{
+        scenes?: Array<{
+          slotNumber: number;
+          title: string;
+          scriptContext: string;
+          prompt: string;
+          linkedSegmentId: string;
+          startTime?: number;
+          endTime?: number;
+          motionPreset?: string;
+          magicalEffect?: string;
+          sfxPreset?: string;
+        }>;
+      }>(response.text, {});
+
+      res.json({
+        defaultAspectRatio,
+        scenes: parsed.scenes || [],
+      });
+    } catch (error: unknown) {
+      console.error('B-Roll script analysis fallback:', error);
+      res.status(200).json({
+        scenes: [],
+        fallbackLocalPlanner: true,
+      });
+    }
+  });
+
+  // Gemini AI Image Creation Endpoint for B-Roll Images (gemini-2.5-flash-image with 9:16, 1:1, 16:9 support)
+  app.post('/api/broll/generate-image', async (req, res) => {
+    try {
+      const { prompt, aspectRatio = '9:16' } = req.body;
+      if (!prompt) {
+        res.status(400).json({ error: 'Missing B-Roll image prompt' });
+        return;
+      }
+
+      const validRatio: '9:16' | '1:1' | '16:9' =
+        aspectRatio === '1:1' || aspectRatio === '16:9' || aspectRatio === '9:16'
+          ? aspectRatio
+          : '9:16';
+
+      const ai = getGenAIClient();
+      const enhancedPrompt = `${prompt}. Ultra-cinematic lighting, shallow depth of field, rich color grading, 8k photorealistic B-roll visual, no text or watermarks.`;
+
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash-image',
+        contents: {
+          parts: [{ text: enhancedPrompt }],
+        },
+        config: {
+          imageConfig: {
+            aspectRatio: validRatio,
+          },
+        },
+      });
+
+      let imageDataUrl = '';
+      const parts = response.candidates?.[0]?.content?.parts || [];
+      for (const part of parts) {
+        if (part.inlineData && part.inlineData.data) {
+          const mime = part.inlineData.mimeType || 'image/png';
+          imageDataUrl = `data:${mime};base64,${part.inlineData.data}`;
+          break;
+        }
+      }
+
+      if (!imageDataUrl) {
+        res.status(200).json({
+          imageDataUrl: '',
+          fallbackRequired: true,
+        });
+        return;
+      }
+
+      res.json({
+        imageDataUrl,
+        aspectRatio: validRatio,
+      });
+    } catch (error: unknown) {
+      console.error('Gemini B-Roll image generation error:', error);
+      res.status(200).json({
+        imageDataUrl: '',
+        fallbackRequired: true,
       });
     }
   });

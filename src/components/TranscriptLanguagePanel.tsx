@@ -30,14 +30,22 @@ import {
   Clock,
   Columns,
   Copy,
+  Image as ImageIcon,
+  Wand2,
+  Sliders,
+  Code2,
 } from 'lucide-react';
 import {
+  AIBRollSlot,
+  BRollDisplayLayout,
+  BRollMagicalEffect,
   CaptionSegment,
   CaptionStyleConfig,
   LineStyleOverride,
   SampleReel,
   StylePreset,
   TrackKey,
+  VideoAspectRatio,
   WordTiming,
 } from '../types/caption';
 import {
@@ -48,11 +56,25 @@ import {
 import {
   KALAKAR_48_BUILT_IN_PRESETS,
   KALAKAR_FONT_FACES,
+  stripEmojisFromText,
+  stripPunctuationFromText,
 } from '../data/kalakarOptionsData';
 import { KalakarShellView } from './KalakarAppShellModals';
+import { AIBRollStudioPanel } from './AIBRollStudioPanel';
+import { KalakarLineStylingPanel } from './KalakarRightPanelTabs';
 import { playOpenSourceSoundEffect } from '../utils/soundEffectsEngine';
+import {
+  isRomanTrack,
+  transliterateIndicToRoman,
+} from '../utils/indicRomanTransliterator';
+import { splitSegmentIntoTwoLines } from '../utils/canvasCaptionRenderer';
 
-export type LeftRailTool = 'captions' | 'masking' | 'custom-fonts' | 'library';
+export type LeftRailTool =
+  | 'captions'
+  | 'broll'
+  | 'masking'
+  | 'custom-fonts'
+  | 'library';
 
 export type CaptionToolBulkAction =
   | 'remove-punctuation'
@@ -129,6 +151,49 @@ interface TranscriptLanguagePanelProps {
   onOpenPrepareMedia?: () => void;
   onOpenShellHub?: (view: KalakarShellView) => void;
   focusedSection?: 'workspace' | 'languages' | 'style' | 'export';
+  // AI Script-to-B-Roll 3-Image Studio props
+  aiBRollSlots?: AIBRollSlot[];
+  isAnalyzingBRollScript?: boolean;
+  onUpdateBRollSlot?: (slotId: string, partial: Partial<AIBRollSlot>) => void;
+  onAnalyzeAndGenerateAllThreeBRolls?: (aspectRatio: VideoAspectRatio) => void;
+  onRegenerateSingleBRollSlotImage?: (
+    slotId: string,
+    prompt: string,
+    aspectRatio: VideoAspectRatio
+  ) => void;
+  onLinkBRollSlotToSegment?: (slotId: string, segmentId: string) => void;
+  onGenerateSegmentCustomBRoll?: (
+    segmentId: string,
+    prompt: string,
+    aspectRatio: VideoAspectRatio
+  ) => void;
+  onOpenRightBRollTab?: () => void;
+  onAddManualTextPlusAtPlayhead?: (customText?: string) => void;
+  onMergeSegmentWithPrev?: (segmentId: string) => void;
+  onMergeSegmentWithNext?: (segmentId: string) => void;
+  onResetSemanticLineScope?: () => void;
+  onCascadeMotherToChildren?: (
+    motherSegId: string,
+    childCount: number | 'all'
+  ) => void;
+  onOpenRemotionModule?: () => void;
+  onSelectLineForStyling?: (segmentId: string) => void;
+}
+
+interface PowerBinFolder {
+  id: string;
+  name: string;
+  scope: 'project' | 'global';
+  createdAt: string;
+}
+
+interface PowerBinAsset {
+  id: string;
+  name: string;
+  type: 'video' | 'stills' | 'audio';
+  scope: 'project' | 'global';
+  folderId: string | null;
+  durationOrSize: string;
 }
 
 export const TranscriptLanguagePanel: React.FC<TranscriptLanguagePanelProps> = ({
@@ -147,6 +212,7 @@ export const TranscriptLanguagePanel: React.FC<TranscriptLanguagePanelProps> = (
   onSplitSegment,
   onAddSegment,
   onDeleteSegment,
+  onSyncToVoiceNow,
   onNudgeDialogueTiming,
   onUpdateSegmentMeta,
   onUpdateWordStyle,
@@ -156,6 +222,16 @@ export const TranscriptLanguagePanel: React.FC<TranscriptLanguagePanelProps> = (
   customFonts = [],
   onUploadCustomFont,
   onOpenPrepareMedia,
+  aiBRollSlots = [],
+  isAnalyzingBRollScript = false,
+  onUpdateBRollSlot,
+  onAnalyzeAndGenerateAllThreeBRolls,
+  onRegenerateSingleBRollSlotImage,
+  onLinkBRollSlotToSegment,
+  onGenerateSegmentCustomBRoll,
+  onOpenRightBRollTab,
+  onOpenRemotionModule,
+  onSelectLineForStyling,
 }) => {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const fontInputRef = useRef<HTMLInputElement | null>(null);
@@ -185,6 +261,59 @@ export const TranscriptLanguagePanel: React.FC<TranscriptLanguagePanelProps> = (
   const [wordsPerLineSelectValue, setWordsPerLineSelectValue] =
     useState<string>('default');
 
+  // Goldox Section 1.2 & 1.3: Scope Mode (Word | Character | Line) & Find/Replace with Match Case
+  const [captionScopeTab, setCaptionScopeTab] = useState<'word' | 'char' | 'line'>('word');
+  const [isFindReplaceOpen, setIsFindReplaceOpen] = useState<boolean>(false);
+  const [findText, setFindText] = useState<string>('');
+  const [replaceText, setReplaceText] = useState<string>('');
+  const [matchCase, setMatchCase] = useState<boolean>(false);
+
+  // Goldox Section 3.3: Mother / Child Line Magic Wand Popover
+  const [activeWandSegId, setActiveWandSegId] = useState<string | null>(null);
+
+  // Goldox Section 4.3: Left-Side Drag Resizer Width (px)
+  const [leftPanelWidthPx, setLeftPanelWidthPx] = useState<number>(470);
+  const isResizingLeftRef = useRef<boolean>(false);
+
+  // Goldox Section 4.1: Project Bins vs Global Power Bins with Folders
+  const [powerBinScope, setPowerBinScope] = useState<'project' | 'global'>('project');
+  const [activeFolderId, setActiveFolderId] = useState<string | null>(null);
+  const [mediaCategoryFilter, setMediaCategoryFilter] = useState<
+    'all' | 'video' | 'stills' | 'audio'
+  >('all');
+  const [newFolderName, setNewFolderName] = useState<string>('');
+  const [powerBinFolders, setPowerBinFolders] = useState<PowerBinFolder[]>(() => [
+    { id: 'fld-hooks', name: 'Viral Hook B-Rolls', scope: 'global', createdAt: 'Today' },
+    { id: 'fld-sfx', name: 'Studio Whoosh & Chimes', scope: 'global', createdAt: 'Today' },
+    { id: 'fld-proj-1', name: 'Scene Cutaways', scope: 'project', createdAt: 'Today' },
+  ]);
+  const [powerBinAssets, setPowerBinAssets] = useState<PowerBinAsset[]>(() => [
+    {
+      id: 'ast-1',
+      name: 'Creator Studio Cutaway 9:16.mp4',
+      type: 'video',
+      scope: 'project',
+      folderId: 'fld-proj-1',
+      durationOrSize: '00:04 · 1080p',
+    },
+    {
+      id: 'ast-2',
+      name: 'Golden Particle Overlay.png',
+      type: 'stills',
+      scope: 'global',
+      folderId: 'fld-hooks',
+      durationOrSize: '1080×1920 · PNG',
+    },
+    {
+      id: 'ast-3',
+      name: 'Cinematic Sub Impact + Whoosh.wav',
+      type: 'audio',
+      scope: 'global',
+      folderId: 'fld-sfx',
+      durationOrSize: '00:02 · WAV',
+    },
+  ]);
+
   const scrollCaptionsList = (deltaY: number) => {
     if (captionsScrollRef.current) {
       captionsScrollRef.current.scrollBy({ top: deltaY, behavior: 'smooth' });
@@ -194,7 +323,7 @@ export const TranscriptLanguagePanel: React.FC<TranscriptLanguagePanelProps> = (
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      onUploadFile(file, true);
+      onUploadFile(file, false);
     }
     e.target.value = '';
   };
@@ -224,8 +353,35 @@ export const TranscriptLanguagePanel: React.FC<TranscriptLanguagePanelProps> = (
     t.name.toLowerCase().includes(lineTemplateSearch.toLowerCase())
   );
 
+  // Goldox Section 1.3: Find & Replace helper with Match Case
+  const findMatchesCount = segments.reduce((acc, seg) => {
+    if (!findText) return 0;
+    const raw = seg.tracks[styleConfig.primaryTrack]?.text || '';
+    if (!raw) return acc;
+    const escaped = findText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const regex = new RegExp(escaped, matchCase ? 'g' : 'gi');
+    const matches = raw.match(regex);
+    return acc + (matches ? matches.length : 0);
+  }, 0);
+
+  const handleReplaceInCaptions = (replaceAll: boolean) => {
+    if (!findText) return;
+    const escaped = findText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const regex = new RegExp(escaped, matchCase ? (replaceAll ? 'g' : '') : replaceAll ? 'gi' : 'i');
+    let replacedOnce = false;
+    segments.forEach((seg) => {
+      if (!replaceAll && replacedOnce) return;
+      const raw = seg.tracks[styleConfig.primaryTrack]?.text || '';
+      if (regex.test(raw)) {
+        const nextText = raw.replace(regex, replaceText);
+        onUpdateSegmentText(seg.id, styleConfig.primaryTrack, nextText);
+        replacedOnce = true;
+      }
+    });
+  };
+
   return (
-    <div className="flex-1 min-h-0 flex gap-2 p-2 pb-1.5 select-none overflow-hidden bg-[#0A0A0D]">
+    <div className="w-full flex-1 min-h-0 flex flex-col sm:flex-row gap-1.5 sm:gap-2 p-1.5 sm:p-2 pb-1.5 select-none overflow-hidden bg-[#0B0B0D] relative">
       {/* Hidden File Inputs */}
       <input
         ref={fileInputRef}
@@ -242,11 +398,12 @@ export const TranscriptLanguagePanel: React.FC<TranscriptLanguagePanelProps> = (
         className="hidden"
       />
 
-      {/* LEFT VERTICAL TOOL RAIL (Exact Kalakar Studio Rail: Captions, Masking, Custom Fonts, Library) */}
-      <div className="w-[72px] shrink-0 bg-[#141418] border border-white/[0.06] rounded-xl py-2.5 px-1.5 flex flex-col items-center gap-2">
+      {/* LEFT VERTICAL TOOL RAIL on Desktop / HORIZONTAL BAR on Mobile (Captions, AI B-Roll, Masking, Custom Fonts, Library) */}
+      <div className="w-full sm:w-[72px] shrink-0 bg-[#141418] border border-white/[0.06] rounded-xl py-1.5 sm:py-2.5 px-1.5 flex flex-row sm:flex-col items-center gap-1.5 sm:gap-2 overflow-x-auto">
         {(
           [
             { id: 'captions', label: 'Captions', icon: Subtitles },
+            { id: 'broll', label: 'AI B-Roll\n(3 Imgs)', icon: ImageIcon },
             { id: 'masking', label: 'Masking', icon: UserCheck },
             { id: 'custom-fonts', label: 'Custom\nFonts', icon: TypeIcon },
             { id: 'library', label: 'Library', icon: FolderOpen },
@@ -259,33 +416,49 @@ export const TranscriptLanguagePanel: React.FC<TranscriptLanguagePanelProps> = (
               key={item.id}
               type="button"
               onClick={() => setActiveRailTool(item.id)}
-              className={`w-full py-2.5 px-1 rounded-xl flex flex-col items-center justify-center gap-1.5 transition-all cursor-pointer ${
+              className={`min-w-[68px] sm:min-w-0 sm:w-full py-1.5 sm:py-2.5 px-2 sm:px-1 rounded-xl flex flex-row sm:flex-col items-center justify-center gap-1.5 transition-all cursor-pointer shrink-0 ${
                 active
                   ? 'bg-[#172A21] text-[#2BAE66] border border-[#2BAE66]/30 shadow-sm'
                   : 'text-zinc-400 hover:text-zinc-200 hover:bg-white/[0.04]'
               }`}
             >
               <Icon className="w-4 h-4 shrink-0" />
-              <span className="text-[10px] font-medium leading-tight text-center whitespace-pre-line">
-                {item.label}
+              <span className="text-[10px] font-medium leading-tight text-center sm:whitespace-pre-line whitespace-nowrap">
+                {item.label.replace('\n', ' ')}
               </span>
             </button>
           );
         })}
+
+        {/* Dedicated Remotion Engine Module Trigger in Left Rail */}
+        {onOpenRemotionModule && (
+          <button
+            type="button"
+            onClick={onOpenRemotionModule}
+            title="Switch to Dedicated Remotion Video & Caption Editing Module (remotion-dev/remotion)"
+            className="min-w-[72px] sm:min-w-0 sm:w-full py-1.5 sm:py-2.5 px-2 sm:px-1 rounded-xl flex flex-row sm:flex-col items-center justify-center gap-1.5 transition-all cursor-pointer text-[#60a5fa] hover:text-white bg-[#0B84F3]/10 hover:bg-[#0B84F3]/25 border border-[#0B84F3]/30 sm:mt-auto shrink-0"
+          >
+            <Code2 className="w-4 h-4 shrink-0" />
+            <span className="text-[10px] font-semibold leading-tight text-center whitespace-nowrap">
+              Remotion
+            </span>
+          </button>
+        )}
       </div>
 
       {/* MAIN LEFT PANEL CONTAINER */}
-      <div className="flex-1 min-w-0 bg-[#121216] border border-white/[0.06] rounded-xl flex flex-col overflow-hidden relative">
-        {/* RAIL VIEW: MASKING */}
-        {activeRailTool === 'masking' && (
-          <div className="flex-1 overflow-y-auto p-4 space-y-3 text-xs">
+      <div className="flex-1 min-h-0 min-w-0 bg-[#121216] border border-white/[0.06] rounded-xl flex flex-col overflow-hidden relative">
+        {/* RAIL VIEW: AI B-ROLL (3 Script-Analyzed Images in 9:16, 1:1, 16:9 + Magical Effects) */}
+        {activeRailTool === 'broll' && (
+          <div className="flex-1 overflow-y-auto p-3.5 space-y-3 text-xs">
             <div className="flex items-center justify-between">
               <div>
-                <h3 className="text-sm font-bold text-white">
-                  Depth Masking (Put Captions Behind Subject)
+                <h3 className="text-sm font-bold text-white flex items-center gap-1.5">
+                  <Sparkles className="w-4 h-4 text-[#FDE047]" />
+                  <span>AI Script-to-B-Roll (3 Images)</span>
                 </h3>
                 <p className="text-[11px] text-zinc-400">
-                  Place large hero words behind the speaker or apply studio gradient vignettes
+                  Gemini AI script analysis &amp; image generation in 9:16, 1:1, or 16:9
                 </p>
               </div>
               <button
@@ -295,6 +468,67 @@ export const TranscriptLanguagePanel: React.FC<TranscriptLanguagePanelProps> = (
               >
                 Back to Captions
               </button>
+            </div>
+
+            <AIBRollStudioPanel
+              segments={segments}
+              primaryTrack={styleConfig.primaryTrack}
+              styleConfig={styleConfig}
+              aiBRollSlots={aiBRollSlots}
+              isAnalyzingScript={isAnalyzingBRollScript}
+              onUpdateStyle={(p) => onUpdateStyle?.(p)}
+              onUpdateSlot={(slotId, partial) => onUpdateBRollSlot?.(slotId, partial)}
+              onAnalyzeAndGenerateAllThree={(ratio) =>
+                onAnalyzeAndGenerateAllThreeBRolls?.(ratio)
+              }
+              onRegenerateSingleSlotImage={(slotId, prompt, ratio) =>
+                onRegenerateSingleBRollSlotImage?.(slotId, prompt, ratio)
+              }
+              onLinkSlotToSegment={(slotId, segmentId) =>
+                onLinkBRollSlotToSegment?.(slotId, segmentId)
+              }
+              onSeekTo={onSeekTo}
+            />
+          </div>
+        )}
+
+        {/* RAIL VIEW: MASKING */}
+        {activeRailTool === 'masking' && (
+          <div className="flex-1 overflow-y-auto p-4 space-y-3 text-xs">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-sm font-bold text-white">
+                  Studio Gradient Vignette &amp; Behind-the-Head Module
+                </h3>
+                <p className="text-[11px] text-zinc-400">
+                  Apply studio gradient vignettes (Behind-the-Head AI Cutout is currently disabled for V2 upgrade)
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setActiveRailTool('captions')}
+                className="px-2.5 py-1 rounded-lg bg-[#1E1E24] text-zinc-300 hover:text-white text-[11px] cursor-pointer"
+              >
+                Back to Captions
+              </button>
+            </div>
+
+            {/* Disabled Behind-the-Head Module Notice (Preserved, Not Removed) */}
+            <div className="p-3 rounded-xl bg-zinc-900/90 border border-white/10 flex items-center justify-between gap-3 opacity-60 cursor-not-allowed">
+              <div className="flex items-center gap-2.5">
+                <UserCheck className="w-4 h-4 text-zinc-400 shrink-0" />
+                <div>
+                  <div className="text-xs font-bold text-zinc-300">
+                    Behind the Head (AI Person Cutout)
+                  </div>
+                  <div className="text-[10px] text-zinc-400">
+                    Temporarily disabled — preserved for upcoming V2 Behind-the-Head engine
+                  </div>
+                </div>
+              </div>
+              <span className="px-2 py-0.5 rounded bg-zinc-800 text-zinc-400 text-[10px] font-mono font-bold shrink-0">
+                DISABLED
+              </span>
             </div>
 
             <div className="grid grid-cols-2 gap-2">
@@ -362,21 +596,36 @@ export const TranscriptLanguagePanel: React.FC<TranscriptLanguagePanelProps> = (
                 {customFonts.map((fn) => (
                   <div
                     key={fn}
-                    className="p-2.5 rounded-xl bg-[#18181E] border border-white/[0.06] flex items-center justify-between"
+                    className="p-2.5 rounded-xl bg-[#18181E] border border-white/[0.06] flex items-center justify-between gap-2"
                   >
-                    <span className="text-white font-semibold">{fn}</span>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        onUpdateStyle?.({
-                          fontFamily: fn,
-                          heroWordFontFamily: fn,
-                        })
-                      }
-                      className="px-2.5 py-1 rounded-lg bg-[#2BAE66] text-white text-[10px] font-semibold cursor-pointer"
-                    >
-                      Apply Font
-                    </button>
+                    <span className="text-white font-semibold truncate">{fn}</span>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          onUpdateStyle?.({
+                            fontFamily: fn,
+                            heroWordFontFamily: fn,
+                          })
+                        }
+                        className="px-2.5 py-1 rounded-lg bg-[#2BAE66] text-white text-[10px] font-semibold cursor-pointer"
+                      >
+                        Apply Font
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const win = window as unknown as {
+                            __merupifyDeleteFont?: (n: string) => void;
+                          };
+                          win.__merupifyDeleteFont?.(fn);
+                        }}
+                        title="Delete uploaded custom font"
+                        className="p-1.5 rounded-lg bg-rose-500/15 hover:bg-rose-600 text-rose-300 hover:text-white cursor-pointer transition-colors"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -384,16 +633,16 @@ export const TranscriptLanguagePanel: React.FC<TranscriptLanguagePanelProps> = (
           </div>
         )}
 
-        {/* RAIL VIEW: LIBRARY (Upload Video, Switch Sample Reels, 101 Languages) */}
+        {/* RAIL VIEW: LIBRARY & GOLDOX POWER BINS (This Project vs Global Power Bins + Folders + Back Arrow + Asset Filters) */}
         {activeRailTool === 'library' && (
-          <div className="flex-1 overflow-y-auto p-4 space-y-3 text-xs">
+          <div className="flex-1 overflow-y-auto p-4 space-y-3.5 text-xs">
             <div className="flex items-center justify-between">
               <div>
                 <h3 className="text-sm font-bold text-white">
-                  Media Library &amp; 101 Languages
+                  Media Power Bins &amp; 101 Languages
                 </h3>
                 <p className="text-[11px] text-zinc-400">
-                  Upload MP4/MOV video or switch built-in sample reels
+                  Project Bins (this edit) &amp; Global Power Bins (saved across all projects)
                 </p>
               </div>
               <button
@@ -409,7 +658,7 @@ export const TranscriptLanguagePanel: React.FC<TranscriptLanguagePanelProps> = (
               <button
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
-                className="p-3.5 rounded-xl bg-[#2BAE66] hover:bg-[#249657] text-white font-semibold flex items-center justify-center gap-2 cursor-pointer"
+                className="p-3 rounded-xl bg-[#2BAE66] hover:bg-[#249657] text-white font-semibold flex items-center justify-center gap-2 cursor-pointer"
               >
                 <Upload className="w-4 h-4" />
                 <span>Upload Video (MP4/MOV)</span>
@@ -418,12 +667,192 @@ export const TranscriptLanguagePanel: React.FC<TranscriptLanguagePanelProps> = (
                 <button
                   type="button"
                   onClick={onOpenPrepareMedia}
-                  className="p-3.5 rounded-xl bg-[#1C1C22] hover:bg-[#25252E] border border-white/10 text-zinc-100 font-semibold flex items-center justify-center gap-2 cursor-pointer"
+                  className="p-3 rounded-xl bg-[#1C1C22] hover:bg-[#25252E] border border-white/10 text-zinc-100 font-semibold flex items-center justify-center gap-2 cursor-pointer"
                 >
                   <Sparkles className="w-4 h-4 text-[#34D399]" />
                   <span>Prepare Media (101 Langs)</span>
                 </button>
               )}
+            </div>
+
+            {/* GOLDOX SECTION 4.1: PROJECT BINS vs GLOBAL POWER BINS */}
+            <div className="p-3 rounded-xl bg-[#16171E] border border-white/[0.08] space-y-2.5">
+              {/* Scope Toggle: This Project vs Global Power Bin */}
+              <div className="grid grid-cols-2 gap-1.5 bg-[#0F1015] p-1 rounded-lg border border-white/[0.06]">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPowerBinScope('project');
+                    setActiveFolderId(null);
+                  }}
+                  className={`py-1.5 px-2 rounded-md text-[11px] font-bold cursor-pointer transition-all ${
+                    powerBinScope === 'project'
+                      ? 'bg-[#2BAE66] text-white'
+                      : 'text-zinc-400 hover:text-white'
+                  }`}
+                  title="Media assets for this project only"
+                >
+                  📁 This Project Bin
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPowerBinScope('global');
+                    setActiveFolderId(null);
+                  }}
+                  className={`py-1.5 px-2 rounded-md text-[11px] font-bold cursor-pointer transition-all ${
+                    powerBinScope === 'global'
+                      ? 'bg-[#F59E0B] text-zinc-950'
+                      : 'text-zinc-400 hover:text-white'
+                  }`}
+                  title="Global Power Bin — reusable across every project"
+                >
+                  ⚡ Global Power Bin
+                </button>
+              </div>
+
+              {/* Category Filter Tabs: All | Video | Stills | Audio */}
+              <div className="flex items-center justify-between gap-1">
+                {(['all', 'video', 'stills', 'audio'] as const).map((cat) => (
+                  <button
+                    key={cat}
+                    type="button"
+                    onClick={() => setMediaCategoryFilter(cat)}
+                    className={`flex-1 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider cursor-pointer border ${
+                      mediaCategoryFilter === cat
+                        ? 'bg-[#172A21] border-[#2BAE66] text-[#34D399]'
+                        : 'bg-[#111217] border-white/[0.06] text-zinc-400 hover:text-white'
+                    }`}
+                  >
+                    {cat}
+                  </button>
+                ))}
+              </div>
+
+              {/* Folder Creation & Parent Back Arrow (<-) */}
+              <div className="flex items-center gap-1.5">
+                {activeFolderId && (
+                  <button
+                    type="button"
+                    onClick={() => setActiveFolderId(null)}
+                    title="Return to parent folder (<-)"
+                    className="px-2.5 py-1.5 rounded-lg bg-[#252630] hover:bg-[#2BAE66] text-white font-mono font-bold text-[11px] cursor-pointer shrink-0"
+                  >
+                    &lt;- Back
+                  </button>
+                )}
+                <input
+                  type="text"
+                  value={newFolderName}
+                  onChange={(e) => setNewFolderName(e.target.value)}
+                  placeholder={
+                    activeFolderId
+                      ? `Inside Folder: ${
+                          powerBinFolders.find((f) => f.id === activeFolderId)?.name || ''
+                        }`
+                      : 'New folder name...'
+                  }
+                  className="flex-1 bg-[#101116] text-white text-[11px] px-2.5 py-1.5 rounded-lg border border-white/10 focus:outline-none focus:border-[#2BAE66]"
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    const clean = newFolderName.trim() || `Folder ${powerBinFolders.length + 1}`;
+                    setPowerBinFolders((prev) => [
+                      ...prev,
+                      {
+                        id: `fld-${Date.now()}`,
+                        name: clean,
+                        scope: powerBinScope,
+                        createdAt: 'Just now',
+                      },
+                    ]);
+                    setNewFolderName('');
+                  }}
+                  className="px-2.5 py-1.5 rounded-lg bg-[#2BAE66] text-white text-[11px] font-bold cursor-pointer shrink-0"
+                  title="Create a new folder in this bin"
+                >
+                  + Folder
+                </button>
+              </div>
+
+              {/* Folders List (Double-click or click to enter, Trash icon to delete) */}
+              {!activeFolderId && (
+                <div className="space-y-1">
+                  {powerBinFolders
+                    .filter((f) => f.scope === powerBinScope)
+                    .map((folder) => (
+                      <div
+                        key={folder.id}
+                        onDoubleClick={() => setActiveFolderId(folder.id)}
+                        onClick={() => setActiveFolderId(folder.id)}
+                        title="Double-click or click to open folder"
+                        className="p-2 rounded-lg bg-[#111218] hover:bg-[#1B1D26] border border-white/[0.06] flex items-center justify-between cursor-pointer"
+                      >
+                        <div className="flex items-center gap-2 min-w-0">
+                          <FolderOpen className="w-3.5 h-3.5 text-[#FDE047] shrink-0" />
+                          <span className="font-semibold text-white truncate">
+                            {folder.name}
+                          </span>
+                          <span className="text-[9px] font-mono text-zinc-500">
+                            (Open →)
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setPowerBinFolders((prev) =>
+                              prev.filter((item) => item.id !== folder.id)
+                            );
+                          }}
+                          title="Delete folder"
+                          className="p-1 rounded hover:bg-rose-500/20 text-zinc-400 hover:text-rose-300 cursor-pointer"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                        </button>
+                      </div>
+                    ))}
+                </div>
+              )}
+
+              {/* Assets List inside active bin/folder */}
+              <div className="space-y-1 pt-1">
+                {powerBinAssets
+                  .filter(
+                    (a) =>
+                      a.scope === powerBinScope &&
+                      (activeFolderId ? a.folderId === activeFolderId : true) &&
+                      (mediaCategoryFilter === 'all' || a.type === mediaCategoryFilter)
+                  )
+                  .map((asset) => (
+                    <div
+                      key={asset.id}
+                      className="p-2 rounded-lg bg-[#12131A] border border-white/[0.05] flex items-center justify-between gap-2"
+                    >
+                      <div className="min-w-0">
+                        <div className="text-[11px] font-semibold text-zinc-200 truncate">
+                          {asset.name}
+                        </div>
+                        <div className="text-[9px] font-mono text-zinc-500 uppercase">
+                          {asset.type} · {asset.durationOrSize}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setPowerBinAssets((prev) =>
+                            prev.filter((item) => item.id !== asset.id)
+                          )
+                        }
+                        title="Delete asset from bin"
+                        className="p-1 rounded hover:bg-rose-500/20 text-zinc-400 hover:text-rose-300 cursor-pointer"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                    </div>
+                  ))}
+              </div>
             </div>
 
             <div className="space-y-1.5 pt-1">
@@ -458,13 +887,13 @@ export const TranscriptLanguagePanel: React.FC<TranscriptLanguagePanelProps> = (
           </div>
         )}
 
-        {/* RAIL VIEW: CAPTIONS (Exact Kalakar Minimal Header + Single-Row Numbered Lines) */}
+        {/* RAIL VIEW: CAPTIONS (Exact Stitch Minimal Header + Numbered Lines OR Centered Caption Tools View) */}
         {activeRailTool === 'captions' && (
           <>
             {/* TOP HEADER BAR: "Captions" on left | Search Circle + "Caption Tools v" Pill on right */}
-            <div className="px-4 py-2.5 border-b border-white/[0.06] flex items-center justify-between gap-2 shrink-0 relative">
+            <div className="px-4 py-2.5 border-b border-white/[0.06] flex items-center justify-between gap-2 shrink-0 relative bg-[#131315]">
               <div className="flex items-center gap-2.5 min-w-0">
-                <h2 className="text-[17px] font-bold text-white tracking-tight">
+                <h2 className="text-[15px] font-bold text-white tracking-tight">
                   Captions
                 </h2>
 
@@ -473,57 +902,65 @@ export const TranscriptLanguagePanel: React.FC<TranscriptLanguagePanelProps> = (
                   type="button"
                   onClick={() => {
                     setIsLanguagePopoverOpen((v) => !v);
-                    setIsCaptionToolsOpen(false);
                   }}
-                  className="px-2.5 py-1 rounded-full bg-[#1C1C22] hover:bg-[#25252D] border border-white/[0.08] text-[11px] font-medium text-zinc-300 flex items-center gap-1 cursor-pointer"
+                  className="px-2 py-0.5 rounded-md bg-[#1c1c1f] hover:bg-[#26262a] border border-white/[0.08] text-[11px] font-medium text-zinc-300 flex items-center gap-1 cursor-pointer"
                   title="Switch Caption Language / Script (21+ Desi Languages)"
                 >
                   <span>{primaryMeta.shortLabel}</span>
                   {translatingTrack && (
-                    <Loader2 className="w-3 h-3 animate-spin text-[#34D399]" />
+                    <Loader2 className="w-3 h-3 animate-spin text-[#10b981]" />
                   )}
                   <ChevronDown className="w-3 h-3 text-zinc-400" />
                 </button>
               </div>
 
               <div className="flex items-center gap-1.5 shrink-0">
-                {/* Scroll Up / Down Quick Buttons + Minimize */}
-                {!isCaptionsSectionMinimized && (
-                  <div className="hidden sm:flex items-center gap-1 mr-1">
-                    <button
-                      type="button"
-                      onClick={() => scrollCaptionsList(-200)}
-                      title="Scroll Captions Up"
-                      className="w-7 h-7 rounded-full bg-[#1B1B21] hover:bg-[#25252E] border border-white/[0.08] flex items-center justify-center text-zinc-400 hover:text-white cursor-pointer"
-                    >
-                      <ArrowUp className="w-3.5 h-3.5" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => scrollCaptionsList(200)}
-                      title="Scroll Captions Down"
-                      className="w-7 h-7 rounded-full bg-[#1B1B21] hover:bg-[#25252E] border border-white/[0.08] flex items-center justify-center text-zinc-400 hover:text-white cursor-pointer"
-                    >
-                      <ArrowDown className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                )}
-
-                {/* Search Circle Icon Button (Exact match to screenshot) */}
+                {/* Direct Emojis OFF/ON Status & Toggle Pill */}
                 <button
                   type="button"
-                  onClick={() => setIsSearchOpen((v) => !v)}
-                  title="Search captions"
+                  onClick={() => {
+                    const currentlyOff = styleConfig.removeEmojis !== false;
+                    if (currentlyOff) {
+                      onUpdateStyle?.({ removeEmojis: false });
+                      onApplyCaptionToolAction?.('auto-add-emojis');
+                    } else {
+                      onUpdateStyle?.({ removeEmojis: true });
+                      onApplyCaptionToolAction?.('remove-emojis');
+                    }
+                  }}
+                  title={
+                    styleConfig.removeEmojis !== false
+                      ? 'Emojis are OFF for caption creation & import (Click to turn ON)'
+                      : 'Emojis are ON (Click to turn OFF and remove all emojis)'
+                  }
+                  className={`px-2.5 py-1 rounded-full border text-[11px] font-semibold flex items-center gap-1 transition-colors cursor-pointer ${
+                    styleConfig.removeEmojis === false
+                      ? 'bg-[#10b981]/15 border-[#10b981]/50 text-[#34D399]'
+                      : 'bg-[#1c1c1f] hover:bg-[#26262a] border-white/[0.08] text-zinc-400 hover:text-zinc-200'
+                  }`}
+                >
+                  <Smile className="w-3.5 h-3.5" />
+                  <span>Emojis: {styleConfig.removeEmojis === false ? 'ON' : 'OFF'}</span>
+                </button>
+
+                {/* Circular Search / Find & Replace Button (Exact Stitch app_home_1.png) */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsFindReplaceOpen((v) => !v);
+                    setIsSearchOpen(false);
+                  }}
+                  title="Find & Replace words across all captions (with Match Case)"
                   className={`w-8 h-8 rounded-full border flex items-center justify-center transition-colors cursor-pointer ${
-                    isSearchOpen || searchQuery
-                      ? 'bg-[#172A21] border-[#2BAE66]/50 text-[#34D399]'
-                      : 'bg-[#1B1B21] hover:bg-[#25252D] border-white/[0.08] text-zinc-300'
+                    isFindReplaceOpen || findText
+                      ? 'bg-[#10b981]/15 border-[#10b981]/50 text-[#10b981]'
+                      : 'bg-[#1c1c1f] hover:bg-[#26262a] border-white/[0.08] text-zinc-300 hover:text-white'
                   }`}
                 >
                   <Search className="w-3.5 h-3.5" />
                 </button>
 
-                {/* "Caption Tools v" Rounded Pill Button (Exact match to screenshot — supports left-click & right-click) */}
+                {/* "⚙ Caption Tools v/^" Rounded Pill Button (Exact match to app_home_1.png & app_captions_options.png) */}
                 <button
                   type="button"
                   onClick={() => {
@@ -531,45 +968,24 @@ export const TranscriptLanguagePanel: React.FC<TranscriptLanguagePanelProps> = (
                     setContextMenuState(null);
                     setIsLanguagePopoverOpen(false);
                   }}
-                  onContextMenu={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    setIsCaptionToolsOpen(true);
-                    setContextMenuState(null);
-                    setIsLanguagePopoverOpen(false);
-                  }}
-                  title="Click or Right-Click for Caption Tools & Options"
-                  className={`px-3 py-1.5 rounded-full border text-xs font-medium flex items-center gap-1.5 transition-all cursor-pointer ${
+                  title="Open Caption Tools (Display Settings, Actions, Caption Delay Control)"
+                  className={`px-3.5 py-1.5 rounded-full border text-xs font-medium flex items-center gap-1.5 transition-all cursor-pointer ${
                     isCaptionToolsOpen
-                      ? 'bg-[#172A21] border-[#2BAE66]/60 text-white shadow-sm'
-                      : 'bg-[#1B1B21] hover:bg-[#25252D] border-white/[0.08] text-zinc-200'
+                      ? 'bg-[#1c1c1f] border-white/20 text-white shadow-sm'
+                      : 'bg-[#1c1c1f] hover:bg-[#26262a] border-white/[0.08] text-zinc-200'
                   }`}
                 >
-                  <Wrench className="w-3.5 h-3.5 text-[#2BAE66]" />
+                  <Sliders className="w-3.5 h-3.5 text-[#10b981]" />
                   <span>Caption Tools</span>
-                  <ChevronDown className="w-3.5 h-3.5 text-zinc-400" />
-                </button>
-
-                {/* Minimize / Expand Captions List Button */}
-                <button
-                  type="button"
-                  onClick={() => setIsCaptionsSectionMinimized((v) => !v)}
-                  title={
-                    isCaptionsSectionMinimized
-                      ? 'Expand Captions List'
-                      : 'Minimize Captions List'
-                  }
-                  className="w-7 h-7 rounded-full bg-[#1B1B21] hover:bg-[#25252D] border border-white/[0.08] flex items-center justify-center text-zinc-400 hover:text-white cursor-pointer"
-                >
-                  {isCaptionsSectionMinimized ? (
-                    <ChevronDown className="w-3.5 h-3.5" />
-                  ) : (
-                    <ChevronUp className="w-3.5 h-3.5" />
-                  )}
+                  <ChevronDown
+                    className={`w-3.5 h-3.5 text-zinc-400 transition-transform ${
+                      isCaptionToolsOpen ? 'rotate-180' : ''
+                    }`}
+                  />
                 </button>
               </div>
 
-              {/* POPOVER 1: LANGUAGE SWITCHER (21+ Desi Languages + Roman vs Native Script) */}
+              {/* POPOVER 1: LANGUAGE SWITCHER (Roman Tinglish Only vs Native Script + 21+ Desi Languages) */}
               {isLanguagePopoverOpen && (
                 <div className="absolute top-12 left-4 z-40 w-80 p-3 rounded-2xl bg-[#18181E] border border-white/15 shadow-2xl space-y-2.5 text-xs">
                   <div className="flex items-center justify-between border-b border-white/10 pb-1.5">
@@ -584,6 +1000,45 @@ export const TranscriptLanguagePanel: React.FC<TranscriptLanguagePanelProps> = (
                       <X className="w-3.5 h-3.5" />
                     </button>
                   </div>
+
+                  {/* Quick Script Mode Bar: Roman (Tinglish) Only vs Native (Telugu) */}
+                  <div className="grid grid-cols-2 gap-1.5 bg-[#111115] p-1 rounded-xl border border-white/[0.08]">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onSelectPrimaryTrack('tinglish');
+                        setIsLanguagePopoverOpen(false);
+                      }}
+                      className={`py-1.5 px-2.5 rounded-lg text-[11px] font-bold transition-all cursor-pointer flex items-center justify-center gap-1 ${
+                        isRomanTrack(styleConfig.primaryTrack)
+                          ? 'bg-[#10b981] text-[#032b1d] shadow-sm'
+                          : 'text-zinc-400 hover:text-white'
+                      }`}
+                    >
+                      <span>Roman (Tinglish)</span>
+                      {isRomanTrack(styleConfig.primaryTrack) && (
+                        <Check className="w-3 h-3" />
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onSelectPrimaryTrack('telugu');
+                        setIsLanguagePopoverOpen(false);
+                      }}
+                      className={`py-1.5 px-2.5 rounded-lg text-[11px] font-bold transition-all cursor-pointer flex items-center justify-center gap-1 ${
+                        !isRomanTrack(styleConfig.primaryTrack)
+                          ? 'bg-[#10b981] text-[#032b1d] shadow-sm'
+                          : 'text-zinc-400 hover:text-white'
+                      }`}
+                    >
+                      <span>Native (తెలుగు)</span>
+                      {!isRomanTrack(styleConfig.primaryTrack) && (
+                        <Check className="w-3 h-3" />
+                      )}
+                    </button>
+                  </div>
+
                   <div className="grid grid-cols-3 gap-1.5 max-h-52 overflow-y-auto pr-1">
                     {INDIAN_LANGUAGE_MATRIX.map((lang) => {
                       const active = styleConfig.primaryTrack === lang.key;
@@ -597,7 +1052,7 @@ export const TranscriptLanguagePanel: React.FC<TranscriptLanguagePanelProps> = (
                           }}
                           className={`px-2.5 py-1.5 rounded-lg text-left text-[11px] font-medium truncate cursor-pointer border ${
                             active
-                              ? 'bg-[#172A21] border-[#2BAE66] text-[#34D399] font-semibold'
+                              ? 'bg-[#172A21] border-[#10b981] text-[#34D399] font-semibold'
                               : 'bg-[#121216] border-white/[0.06] text-zinc-300 hover:text-white'
                           }`}
                         >
@@ -613,46 +1068,90 @@ export const TranscriptLanguagePanel: React.FC<TranscriptLanguagePanelProps> = (
                         setIsLanguagePopoverOpen(false);
                         onOpenPrepareMedia();
                       }}
-                      className="w-full py-1.5 rounded-lg bg-[#2BAE66] text-white font-semibold text-[11px] cursor-pointer"
+                      className="w-full py-1.5 rounded-lg bg-[#10b981] text-[#032b1d] font-bold text-[11px] cursor-pointer"
                     >
                       Open All 101 Languages &amp; Script Settings
                     </button>
                   )}
                 </div>
               )}
+            </div>
 
-              {/* POPOVER 2: KALAKAR "CAPTION TOOLS" MENU (Exact match to Image 2: Screenshot 2026-10-15 at 12.08.45 PM.png) */}
-              {(isCaptionToolsOpen || contextMenuState !== null) && (
-                <div
-                  onClick={(e) => e.stopPropagation()}
-                  className="absolute top-12 right-3 z-50 w-[340px] max-h-[calc(100vh-140px)] overflow-y-auto p-4 rounded-2xl bg-[#18181F] border border-white/15 shadow-[0_24px_60px_rgba(0,0,0,0.85)] space-y-3.5 text-xs"
-                >
-                  {/* Header */}
-                  <div className="flex items-start justify-between border-b border-white/[0.08] pb-3">
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <Wrench className="w-4 h-4 text-[#2BAE66]" />
-                        <span className="text-sm font-bold text-white">
-                          Caption Tools
-                        </span>
-                      </div>
-                      <p className="text-[11px] text-zinc-400 mt-0.5">
-                        Customize how captions appear and behave
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setIsCaptionToolsOpen(false);
-                        setContextMenuState(null);
-                      }}
-                      className="p-1 rounded-lg text-zinc-400 hover:text-white hover:bg-white/[0.06] cursor-pointer"
-                    >
-                      <X className="w-4 h-4" />
-                    </button>
-                  </div>
+            {/* GOLDOX SECTION 1.3: FIND & REPLACE BAR WITH MATCH CASE */}
+            {(isFindReplaceOpen || isSearchOpen) && (
+              <div className="px-3.5 py-2.5 bg-[#15161D] border-b border-white/[0.07] space-y-2 shrink-0 text-xs">
+                <div className="flex items-center gap-1.5">
+                  <Search className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
+                  <input
+                    type="text"
+                    value={findText}
+                    onChange={(e) => {
+                      setFindText(e.target.value);
+                      setSearchQuery(e.target.value);
+                    }}
+                    placeholder="Find word..."
+                    className="flex-1 bg-[#0E0F14] text-white text-xs px-2.5 py-1 rounded-lg border border-white/10 focus:outline-none focus:border-[#10b981]"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setMatchCase((v) => !v)}
+                    title="Match Case (Aa)"
+                    className={`px-2 py-1 rounded-lg font-mono text-[10px] font-bold border cursor-pointer ${
+                      matchCase
+                        ? 'bg-[#10b981] border-[#10b981] text-[#032b1d]'
+                        : 'bg-[#121319] border-white/10 text-zinc-400 hover:text-white'
+                    }`}
+                  >
+                    Aa Match Case
+                  </button>
+                  <span className="text-[10px] font-mono text-[#34D399] px-1.5">
+                    {findMatchesCount} hit{findMatchesCount === 1 ? '' : 's'}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsFindReplaceOpen(false);
+                      setIsSearchOpen(false);
+                      setFindText('');
+                      setSearchQuery('');
+                    }}
+                    className="text-zinc-400 hover:text-white cursor-pointer"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
 
-                  {/* Contextual Line / Word Quick Actions when Right-Clicked on a Caption Line */}
+                <div className="flex items-center gap-1.5">
+                  <input
+                    type="text"
+                    value={replaceText}
+                    onChange={(e) => setReplaceText(e.target.value)}
+                    placeholder="Replace with..."
+                    className="flex-1 bg-[#0E0F14] text-white text-xs px-2.5 py-1 rounded-lg border border-white/10 focus:outline-none focus:border-[#10b981]"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => handleReplaceInCaptions(false)}
+                    className="px-2.5 py-1 rounded-lg bg-[#1E1F28] hover:bg-[#10b981] text-zinc-200 hover:text-[#032b1d] text-[11px] font-semibold cursor-pointer"
+                  >
+                    Replace
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleReplaceInCaptions(true)}
+                    className="px-2.5 py-1 rounded-lg bg-[#10b981] hover:bg-[#34d399] text-[#032b1d] text-[11px] font-bold cursor-pointer"
+                  >
+                    Replace All
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* VIEW A: FULL-PANEL CENTERED "CAPTION TOOLS" VIEW (Exact match to app_captions_options.png & app_captions_settings.png) */}
+            {(isCaptionToolsOpen || contextMenuState !== null) ? (
+              <div className="flex-1 min-h-0 overflow-y-auto px-6 py-4 bg-[#121216] select-none">
+                <div className="max-w-[540px] mx-auto space-y-5">
+                  {/* Contextual Line Quick Actions when Right-Clicked on a Caption Line */}
                   {contextMenuState?.segmentId && (() => {
                     const targetSeg = segments.find(
                       (s) => s.id === contextMenuState.segmentId
@@ -662,7 +1161,7 @@ export const TranscriptLanguagePanel: React.FC<TranscriptLanguagePanelProps> = (
                       targetSeg.displayLineNumber ??
                       segments.findIndex((s) => s.id === targetSeg.id) + 1;
                     return (
-                      <div className="p-2.5 rounded-xl bg-[#13261D] border border-[#2BAE66]/40 space-y-2">
+                      <div className="p-2.5 rounded-xl bg-[#13261D] border border-[#10b981]/40 space-y-2">
                         <div className="flex items-center justify-between">
                           <span className="text-[11px] font-bold text-[#34D399]">
                             Line #{segNum} Quick Actions
@@ -679,7 +1178,7 @@ export const TranscriptLanguagePanel: React.FC<TranscriptLanguagePanelProps> = (
                               setContextMenuState(null);
                               setIsCaptionToolsOpen(false);
                             }}
-                            className="px-2 py-1.5 rounded-lg bg-[#1C1C24] hover:bg-[#2BAE66] text-white text-[11px] font-medium flex items-center justify-center gap-1 cursor-pointer transition-colors"
+                            className="px-2 py-1.5 rounded-lg bg-[#1C1C24] hover:bg-[#10b981] text-white hover:text-[#032b1d] text-[11px] font-medium flex items-center justify-center gap-1 cursor-pointer transition-colors"
                           >
                             <Edit3 className="w-3 h-3" />
                             <span>Edit Text</span>
@@ -690,7 +1189,7 @@ export const TranscriptLanguagePanel: React.FC<TranscriptLanguagePanelProps> = (
                               onSplitSegment(targetSeg.id);
                               setContextMenuState(null);
                             }}
-                            className="px-2 py-1.5 rounded-lg bg-[#1C1C24] hover:bg-[#2BAE66] text-white text-[11px] font-medium flex items-center justify-center gap-1 cursor-pointer transition-colors"
+                            className="px-2 py-1.5 rounded-lg bg-[#1C1C24] hover:bg-[#10b981] text-white hover:text-[#032b1d] text-[11px] font-medium flex items-center justify-center gap-1 cursor-pointer transition-colors"
                           >
                             <Scissors className="w-3 h-3" />
                             <span>Split Line</span>
@@ -711,366 +1210,324 @@ export const TranscriptLanguagePanel: React.FC<TranscriptLanguagePanelProps> = (
                     );
                   })()}
 
-                  {/* Section 1: DISPLAY SETTINGS (Words dropdown, Max Chars input + reset, Lines dropdown) */}
-                  <div className="space-y-2.5">
-                    <div className="text-[10px] font-bold tracking-wider uppercase text-zinc-400">
-                      DISPLAY SETTINGS
-                    </div>
-
-                    {/* Words dropdown: Default, 1 Word, 2 Words, 3 Words, 4 Words, 5 Words */}
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-2 text-zinc-200">
-                        <FileText className="w-3.5 h-3.5 text-zinc-400" />
-                        <span className="text-xs font-medium">Words</span>
-                      </div>
-                      <select
-                        value={wordsPerLineSelectValue}
-                        onChange={(e) => {
-                          const raw = e.target.value;
-                          setWordsPerLineSelectValue(raw);
-                          const numericWords =
-                            raw === 'default' ? 4 : parseInt(raw, 10) || 4;
-                          onUpdateStyle?.({ wordsPerLine: numericWords });
-                          onApplyCaptionToolAction?.('regroup-words', {
-                            wordsPerLine: numericWords,
-                            maxCharsPerLine: styleConfig.maxCharsPerLine ?? 24,
-                          });
-                        }}
-                        className="w-36 bg-[#22222A] hover:bg-[#282832] text-white text-xs font-medium px-2.5 py-1.5 rounded-lg border border-white/10 focus:outline-none focus:border-[#2BAE66] cursor-pointer"
-                      >
-                        <option value="default">Default</option>
-                        <option value="1">1 Word</option>
-                        <option value="2">2 Words</option>
-                        <option value="3">3 Words</option>
-                        <option value="4">4 Words</option>
-                        <option value="5">5 Words</option>
-                      </select>
-                    </div>
-
-                    {/* Max Chars number input (default 24) + Reset button */}
-                    <div className="flex items-center justify-between gap-2 pl-5">
-                      <span className="text-xs font-medium text-zinc-200">
-                        Max Chars
+                  {/* SECTION 1: DISPLAY SETTINGS (3-column grid: Words | Max Chars | Lines) */}
+                  <div className="space-y-3">
+                    <div className="flex items-center gap-3">
+                      <div className="h-[1px] flex-1 bg-white/[0.07]" />
+                      <span className="text-[10px] font-bold tracking-[0.14em] uppercase text-zinc-500">
+                        DISPLAY SETTINGS
                       </span>
-                      <div className="flex items-center gap-1.5 w-36">
-                        <input
-                          type="number"
-                          min={8}
-                          max={60}
-                          value={styleConfig.maxCharsPerLine ?? 24}
-                          onChange={(e) => {
-                            const nextChars = Math.max(
-                              8,
-                              parseInt(e.target.value, 10) || 24
-                            );
-                            onUpdateStyle?.({ maxCharsPerLine: nextChars });
-                            onApplyCaptionToolAction?.('regroup-words', {
-                              wordsPerLine: styleConfig.wordsPerLine ?? 4,
-                              maxCharsPerLine: nextChars,
-                            });
-                          }}
-                          className="flex-1 min-w-0 bg-[#22222A] text-white text-xs font-mono tabular-nums px-2.5 py-1.5 rounded-lg border border-white/10 focus:outline-none focus:border-[#2BAE66]"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => {
-                            onUpdateStyle?.({ maxCharsPerLine: 24 });
-                            onApplyCaptionToolAction?.('regroup-words', {
-                              wordsPerLine: styleConfig.wordsPerLine ?? 4,
-                              maxCharsPerLine: 24,
-                            });
-                          }}
-                          className="p-1.5 rounded-lg bg-[#22222A] hover:bg-[#2B2B35] border border-white/10 text-zinc-400 hover:text-white cursor-pointer shrink-0"
-                          title="Reset Max Chars to 24"
-                        >
-                          <RotateCcw className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
+                      <div className="h-[1px] flex-1 bg-white/[0.07]" />
                     </div>
 
-                    {/* Lines dropdown: 1 Line, 2 Lines, 3 Lines, 4 Lines, 5 Lines */}
-                    <div className="flex items-center justify-between gap-2 pl-5">
-                      <span className="text-xs font-medium text-zinc-200">Lines</span>
-                      <select
-                        value={styleConfig.maxLinesPerCaption ?? 1}
-                        onChange={(e) => {
-                          const ln = parseInt(e.target.value, 10) || 1;
-                          onUpdateStyle?.({
-                            maxLinesPerCaption: ln,
-                            smallTwoLineMode:
-                              ln === 1 ? 'single-line' : 'two-line-split',
-                          });
-                        }}
-                        className="w-36 bg-[#22222A] hover:bg-[#282832] text-white text-xs font-medium px-2.5 py-1.5 rounded-lg border border-white/10 focus:outline-none focus:border-[#2BAE66] cursor-pointer"
-                      >
-                        <option value={1}>1 Line</option>
-                        <option value={2}>2 Lines</option>
-                        <option value={3}>3 Lines</option>
-                        <option value={4}>4 Lines</option>
-                        <option value={5}>5 Lines</option>
-                      </select>
+                    <div className="grid grid-cols-3 gap-3">
+                      {/* Col 1: Words */}
+                      <div className="space-y-1.5">
+                        <label className="text-[11px] font-medium text-zinc-400 block">
+                          Words
+                        </label>
+                        <div className="relative flex items-center bg-[#18181c] border border-white/[0.08] rounded-lg px-2.5 py-2">
+                          <span className="text-[11px] font-bold text-zinc-500 mr-2">T</span>
+                          <select
+                            value={wordsPerLineSelectValue}
+                            onChange={(e) => {
+                              const raw = e.target.value;
+                              setWordsPerLineSelectValue(raw);
+                              const numericWords =
+                                raw === 'default' ? 4 : parseInt(raw, 10) || 4;
+                              onUpdateStyle?.({ wordsPerLine: numericWords });
+                              onApplyCaptionToolAction?.('regroup-words', {
+                                wordsPerLine: numericWords,
+                                maxCharsPerLine: styleConfig.maxCharsPerLine ?? 24,
+                              });
+                            }}
+                            className="w-full bg-transparent text-white text-xs font-medium focus:outline-none cursor-pointer"
+                          >
+                            <option value="default" className="bg-[#18181c]">
+                              Default
+                            </option>
+                            <option value="1" className="bg-[#18181c]">
+                              1 Word
+                            </option>
+                            <option value="2" className="bg-[#18181c]">
+                              2 Words
+                            </option>
+                            <option value="3" className="bg-[#18181c]">
+                              3 Words
+                            </option>
+                            <option value="4" className="bg-[#18181c]">
+                              4 Words
+                            </option>
+                            <option value="5" className="bg-[#18181c]">
+                              5 Words
+                            </option>
+                          </select>
+                        </div>
+                      </div>
+
+                      {/* Col 2: Max Chars (24 + Reset) */}
+                      <div className="space-y-1.5">
+                        <label className="text-[11px] font-medium text-zinc-400 block">
+                          Max Chars
+                        </label>
+                        <div className="flex items-center bg-[#18181c] border border-white/[0.08] rounded-lg px-2.5 py-1.5">
+                          <span className="text-[11px] font-bold text-zinc-500 mr-2">T</span>
+                          <input
+                            type="number"
+                            min={8}
+                            max={60}
+                            value={styleConfig.maxCharsPerLine ?? 24}
+                            onChange={(e) => {
+                              const nextChars = Math.max(
+                                8,
+                                parseInt(e.target.value, 10) || 24
+                              );
+                              onUpdateStyle?.({ maxCharsPerLine: nextChars });
+                              onApplyCaptionToolAction?.('regroup-words', {
+                                wordsPerLine: styleConfig.wordsPerLine ?? 4,
+                                maxCharsPerLine: nextChars,
+                              });
+                            }}
+                            className="w-full bg-transparent text-white text-xs font-mono tabular-nums focus:outline-none"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => {
+                              onUpdateStyle?.({
+                                maxCharsPerLine: 24,
+                                wordsPerLine: 4,
+                              });
+                              onApplyCaptionToolAction?.('regroup-words', {
+                                wordsPerLine: 4,
+                                maxCharsPerLine: 24,
+                              });
+                            }}
+                            title="Reset Max Chars to 24"
+                            className="p-1 text-zinc-500 hover:text-white cursor-pointer shrink-0"
+                          >
+                            <RotateCcw className="w-3 h-3" />
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Col 3: Lines */}
+                      <div className="space-y-1.5">
+                        <label className="text-[11px] font-medium text-zinc-400 block">
+                          Lines
+                        </label>
+                        <div className="relative flex items-center bg-[#18181c] border border-white/[0.08] rounded-lg px-2.5 py-2">
+                          <Columns className="w-3.5 h-3.5 text-zinc-500 mr-2 shrink-0" />
+                          <select
+                            value={styleConfig.maxLinesPerCaption ?? 1}
+                            onChange={(e) => {
+                              const ln = parseInt(e.target.value, 10) || 1;
+                              onUpdateStyle?.({
+                                maxLinesPerCaption: ln,
+                                smallTwoLineMode:
+                                  ln === 1 ? 'single-line' : 'two-line-split',
+                              });
+                            }}
+                            className="w-full bg-transparent text-white text-xs font-medium focus:outline-none cursor-pointer"
+                          >
+                            <option value={1} className="bg-[#18181c]">
+                              1 Line
+                            </option>
+                            <option value={2} className="bg-[#18181c]">
+                              2 Lines
+                            </option>
+                            <option value={3} className="bg-[#18181c]">
+                              3 Lines
+                            </option>
+                          </select>
+                        </div>
+                      </div>
                     </div>
                   </div>
 
-                  {/* Section 2: ACTIONS (4 Kalakar Action Cards with Descriptions & Toggles) */}
-                  <div className="space-y-2 pt-3 border-t border-white/[0.08]">
-                    <div className="text-[10px] font-bold tracking-wider uppercase text-zinc-400">
-                      ACTIONS
+                  {/* SECTION 2: ACTIONS (4 Sleek Dark Cards with Toggle Switches) */}
+                  <div className="space-y-2.5">
+                    <div className="flex items-center gap-3">
+                      <div className="h-[1px] flex-1 bg-white/[0.07]" />
+                      <span className="text-[10px] font-bold tracking-[0.14em] uppercase text-zinc-500">
+                        ACTIONS
+                      </span>
+                      <div className="h-[1px] flex-1 bg-white/[0.07]" />
                     </div>
 
-                    {(
-                      [
-                        {
-                          key: 'removePunctuation',
-                          onAction: 'remove-punctuation' as CaptionToolBulkAction,
-                          offAction: 'restore-punctuation' as CaptionToolBulkAction,
-                          label: 'Remove Punctuation',
-                          desc: 'Strip all punctuation for a minimal look',
-                          icon: TypeIcon,
-                        },
-                        {
-                          key: 'removeEmphasis',
-                          onAction: 'remove-emphasis' as CaptionToolBulkAction,
-                          offAction: 'restore-emphasis' as CaptionToolBulkAction,
-                          label: 'Remove Emphasis',
-                          desc: 'Remove all text emphasis for uniform appearance',
-                          icon: Sparkles,
-                        },
-                        {
-                          key: 'removeGaps',
-                          onAction: 'remove-gaps' as CaptionToolBulkAction,
-                          offAction: 'restore-gaps' as CaptionToolBulkAction,
-                          label: 'Remove Gaps in Captions',
-                          desc: 'Eliminate gaps between captions for seamless flow',
-                          icon: Columns,
-                        },
-                        {
-                          key: 'removeEmojis',
-                          onAction: 'remove-emojis' as CaptionToolBulkAction,
-                          offAction: 'auto-add-emojis' as CaptionToolBulkAction,
-                          label: 'Remove Emojis',
-                          desc: 'Remove all emojis from captions',
-                          icon: Smile,
-                        },
-                      ] as const
-                    ).map((item) => {
-                      const Icon = item.icon;
-                      const isOn = Boolean(styleConfig[item.key]);
-                      return (
-                        <div
-                          key={item.key}
-                          onClick={() => {
-                            const nextState = !isOn;
-                            onUpdateStyle?.({ [item.key]: nextState });
-                            onApplyCaptionToolAction?.(
-                              nextState ? item.onAction : item.offAction
-                            );
-                          }}
-                          className="p-2.5 rounded-xl bg-[#202028] hover:bg-[#25252F] border border-white/[0.06] flex items-center justify-between gap-3 cursor-pointer transition-colors"
-                        >
-                          <div className="flex items-start gap-2.5 min-w-0">
-                            <div className="w-7 h-7 rounded-lg bg-[#16161C] border border-white/[0.06] flex items-center justify-center text-zinc-300 shrink-0 mt-0.5">
-                              <Icon className="w-3.5 h-3.5" />
-                            </div>
-                            <div className="min-w-0">
-                              <div className="text-xs font-semibold text-white leading-snug">
-                                {item.label}
-                              </div>
-                              <div className="text-[10px] text-zinc-400 leading-tight mt-0.5">
-                                {item.desc}
-                              </div>
-                            </div>
-                          </div>
-
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
+                    <div className="space-y-2">
+                      {(
+                        [
+                          {
+                            key: 'removePunctuation',
+                            onAction: 'remove-punctuation' as CaptionToolBulkAction,
+                            offAction: 'restore-punctuation' as CaptionToolBulkAction,
+                            label: 'Remove Punctuation',
+                            desc: 'Strip all punctuation for a cleaner, minimal look',
+                            icon: TypeIcon,
+                          },
+                          {
+                            key: 'removeEmphasis',
+                            onAction: 'remove-emphasis' as CaptionToolBulkAction,
+                            offAction: 'restore-emphasis' as CaptionToolBulkAction,
+                            label: 'Restore Emphasis',
+                            desc: 'Bring back bold, italic, and highlighted text styling',
+                            icon: Sparkles,
+                          },
+                          {
+                            key: 'removeGaps',
+                            onAction: 'remove-gaps' as CaptionToolBulkAction,
+                            offAction: 'restore-gaps' as CaptionToolBulkAction,
+                            label: 'Remove Gaps in Captions',
+                            desc: 'Eliminate gaps between captions for seamless flow',
+                            icon: Columns,
+                          },
+                          {
+                            key: 'removeEmojis',
+                            onAction: 'remove-emojis' as CaptionToolBulkAction,
+                            offAction: 'auto-add-emojis' as CaptionToolBulkAction,
+                            label: 'Remove Emojis',
+                            desc: 'Remove all emojis from captions',
+                            icon: Smile,
+                          },
+                        ] as const
+                      ).map((item) => {
+                        const Icon = item.icon;
+                        const isOn = Boolean(styleConfig[item.key]);
+                        return (
+                          <div
+                            key={item.key}
+                            onClick={() => {
                               const nextState = !isOn;
                               onUpdateStyle?.({ [item.key]: nextState });
                               onApplyCaptionToolAction?.(
                                 nextState ? item.onAction : item.offAction
                               );
                             }}
-                            className={`w-9 h-5 rounded-full p-0.5 transition-colors cursor-pointer shrink-0 ${
-                              isOn ? 'bg-[#2BAE66]' : 'bg-zinc-700'
-                            }`}
+                            className="p-3 rounded-xl bg-[#17171b] hover:bg-[#1c1c21] border border-white/[0.06] flex items-center justify-between gap-3 cursor-pointer transition-colors"
                           >
-                            <div
-                              className={`w-4 h-4 rounded-full bg-white transition-transform ${
-                                isOn ? 'translate-x-4' : 'translate-x-0'
+                            <div className="flex items-center gap-3 min-w-0">
+                              <div className="w-8 h-8 rounded-lg bg-[#202026] border border-white/[0.06] flex items-center justify-center text-zinc-400 shrink-0">
+                                <Icon className="w-4 h-4" />
+                              </div>
+                              <div className="min-w-0">
+                                <div className="text-xs font-semibold text-white leading-snug">
+                                  {item.label}
+                                </div>
+                                <div className="text-[11px] text-zinc-500 leading-tight mt-0.5 truncate">
+                                  {item.desc}
+                                </div>
+                              </div>
+                            </div>
+
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                const nextState = !isOn;
+                                onUpdateStyle?.({ [item.key]: nextState });
+                                onApplyCaptionToolAction?.(
+                                  nextState ? item.onAction : item.offAction
+                                );
+                              }}
+                              className={`w-9 h-5 rounded-full p-0.5 transition-colors cursor-pointer shrink-0 ${
+                                isOn ? 'bg-[#10b981]' : 'bg-zinc-700'
                               }`}
-                            />
-                          </button>
-                        </div>
-                      );
-                    })}
-
-                    {/* AI Subject Depth Mask Card (Place Captions Behind Speaker's Head) */}
-                    <div
-                      onClick={() => {
-                        const nextDepth = !styleConfig.captionDepthBehindSubject;
-                        onUpdateStyle?.({
-                          captionDepthBehindSubject: nextDepth,
-                          ...(nextDepth ? { positionY: 31 } : {}),
-                        });
-                      }}
-                      className="p-2.5 rounded-xl bg-[#162720] hover:bg-[#1B3128] border border-[#2BAE66]/40 flex items-center justify-between gap-3 cursor-pointer transition-colors"
-                    >
-                      <div className="flex items-start gap-2.5 min-w-0">
-                        <div className="w-7 h-7 rounded-lg bg-[#111F19] border border-[#2BAE66]/40 flex items-center justify-center text-[#34D399] shrink-0 mt-0.5">
-                          <UserCheck className="w-3.5 h-3.5" />
-                        </div>
-                        <div className="min-w-0">
-                          <div className="text-xs font-semibold text-white leading-snug">
-                            Placed Caption Behind Subject (Depth Mask)
+                            >
+                              <div
+                                className={`w-4 h-4 rounded-full bg-white transition-transform ${
+                                  isOn ? 'translate-x-4' : 'translate-x-0'
+                                }`}
+                              />
+                            </button>
                           </div>
-                          <div className="text-[10px] text-[#34D399]/90 leading-tight mt-0.5">
-                            Real-time AI person cutout places text behind speaker&apos;s head
-                          </div>
-                        </div>
-                      </div>
-
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          const nextDepth = !styleConfig.captionDepthBehindSubject;
-                          onUpdateStyle?.({
-                            captionDepthBehindSubject: nextDepth,
-                            ...(nextDepth ? { positionY: 31 } : {}),
-                          });
-                        }}
-                        className={`w-9 h-5 rounded-full p-0.5 transition-colors cursor-pointer shrink-0 ${
-                          styleConfig.captionDepthBehindSubject
-                            ? 'bg-[#2BAE66]'
-                            : 'bg-zinc-700'
-                        }`}
-                      >
-                        <div
-                          className={`w-4 h-4 rounded-full bg-white transition-transform ${
-                            styleConfig.captionDepthBehindSubject
-                              ? 'translate-x-4'
-                              : 'translate-x-0'
-                          }`}
-                        />
-                      </button>
+                        );
+                      })}
                     </div>
                   </div>
 
-                  {/* Section 3: TIMING — Caption Delay Control (-5s to +5s) */}
-                  <div className="space-y-2 pt-3 border-t border-white/[0.08]">
-                    <div className="text-[10px] font-bold tracking-wider uppercase text-zinc-400">
-                      TIMING
+                  {/* SECTION 3: TIMING — Caption Delay Control (-5s to 0 to +5s) */}
+                  <div className="space-y-2.5">
+                    <div className="flex items-center gap-3">
+                      <div className="h-[1px] flex-1 bg-white/[0.07]" />
+                      <span className="text-[10px] font-bold tracking-[0.14em] uppercase text-zinc-500">
+                        TIMING
+                      </span>
+                      <div className="h-[1px] flex-1 bg-white/[0.07]" />
                     </div>
 
-                    <div className="p-3 rounded-xl bg-[#202028] border border-white/[0.06] space-y-2.5">
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="flex items-start gap-2">
-                          <Clock className="w-3.5 h-3.5 text-zinc-400 mt-0.5 shrink-0" />
+                    <div className="p-3.5 rounded-xl bg-[#17171b] border border-white/[0.06] space-y-3">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-3">
+                          <div className="w-8 h-8 rounded-lg bg-[#202026] border border-white/[0.06] flex items-center justify-center text-zinc-400 shrink-0">
+                            <Clock className="w-4 h-4" />
+                          </div>
                           <div>
                             <div className="text-xs font-semibold text-white leading-tight">
                               Caption Delay Control
                             </div>
-                            <div className="text-[10px] text-zinc-400 mt-0.5">
-                              Shift all captions earlier or later
+                            <div className="text-[11px] text-zinc-500 mt-0.5">
+                              Shift all captions earlier or later in time
                             </div>
                           </div>
                         </div>
-                        <span className="px-2 py-0.5 rounded-md bg-[#15151B] border border-white/10 font-mono tabular-nums text-[10px] text-zinc-300 shrink-0">
-                          {Math.abs(styleConfig.captionDelaySeconds || 0) < 0.05
-                            ? 'No delay'
-                            : `${(styleConfig.captionDelaySeconds || 0) > 0 ? '+' : ''}${(
-                                styleConfig.captionDelaySeconds || 0
-                              ).toFixed(1)}s`}
-                        </span>
+
+                        <div className="flex items-center gap-1.5">
+                          <span className="px-2.5 py-1 rounded-md bg-[#202026] border border-white/[0.06] font-mono tabular-nums text-[11px] text-zinc-300">
+                            {Math.abs(styleConfig.captionDelaySeconds || 0) < 0.005
+                              ? 'No delay'
+                              : `${(styleConfig.captionDelaySeconds || 0) > 0 ? '+' : ''}${(
+                                  styleConfig.captionDelaySeconds || 0
+                                ).toFixed(2)}s`}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const prevDelay =
+                                styleConfig.captionDelaySeconds ?? 0;
+                              onUpdateStyle?.({ captionDelaySeconds: 0 });
+                              if (Math.abs(prevDelay) >= 0.005) {
+                                onNudgeDialogueTiming(-prevDelay, 1);
+                              }
+                            }}
+                            title="Reset delay to 0"
+                            className="p-1.5 rounded-md bg-[#202026] hover:bg-[#2a2a32] border border-white/[0.06] text-zinc-400 hover:text-white cursor-pointer"
+                          >
+                            <RotateCcw className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
                       </div>
 
-                      <div className="flex items-center gap-2 pt-1">
-                        <span className="text-[10px] font-mono text-zinc-500">
-                          -5s
-                        </span>
+                      <div className="space-y-1 pt-1">
                         <input
                           type="range"
                           min={-5}
                           max={5}
-                          step={0.1}
-                          value={styleConfig.captionDelaySeconds ?? 0}
+                          step={0.05}
+                          value={Math.max(
+                            -5,
+                            Math.min(5, styleConfig.captionDelaySeconds ?? 0)
+                          )}
                           onChange={(e) => {
                             const nextDelay = parseFloat(e.target.value);
                             const prevDelay =
                               styleConfig.captionDelaySeconds ?? 0;
                             const delta = nextDelay - prevDelay;
                             onUpdateStyle?.({ captionDelaySeconds: nextDelay });
-                            if (Math.abs(delta) > 0.01) {
+                            if (Math.abs(delta) >= 0.005) {
                               onNudgeDialogueTiming(delta, 1);
                             }
                           }}
-                          className="flex-1 accent-[#2BAE66] cursor-pointer"
+                          className="w-full accent-[#10b981] cursor-pointer"
                         />
-                        <span className="text-[10px] font-mono text-zinc-500">
-                          +5s
-                        </span>
+                        <div className="flex items-center justify-between text-[10px] font-mono text-zinc-500">
+                          <span>-5s</span>
+                          <span>0</span>
+                          <span>+5s</span>
+                        </div>
                       </div>
-
-                      {Math.abs(styleConfig.captionDelaySeconds || 0) >= 0.05 && (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const prevDelay =
-                              styleConfig.captionDelaySeconds ?? 0;
-                            onUpdateStyle?.({ captionDelaySeconds: 0 });
-                            if (Math.abs(prevDelay) > 0.01) {
-                              onNudgeDialogueTiming(-prevDelay, 1);
-                            }
-                          }}
-                          className="w-full py-1.5 rounded-lg bg-[#16161C] hover:bg-[#2BAE66] text-zinc-300 hover:text-white text-[11px] font-semibold flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
-                        >
-                          <RotateCcw className="w-3 h-3" />
-                          <span>Reset caption delay</span>
-                        </button>
-                      )}
                     </div>
                   </div>
                 </div>
-              )}
-            </div>
-
-            {/* OPTIONAL SEARCH BAR (Shown when Search icon is clicked) */}
-            {isSearchOpen && (
-              <div className="px-4 py-2 bg-[#16161B] border-b border-white/[0.06] flex items-center gap-2 shrink-0">
-                <Search className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
-                <input
-                  type="text"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Search captions by word..."
-                  autoFocus
-                  className="flex-1 bg-transparent text-xs text-white placeholder-zinc-500 focus:outline-none"
-                />
-                {searchQuery && (
-                  <button
-                    type="button"
-                    onClick={() => setSearchQuery('')}
-                    className="text-zinc-400 hover:text-white cursor-pointer"
-                  >
-                    <X className="w-3.5 h-3.5" />
-                  </button>
-                )}
-              </div>
-            )}
-
-            {/* SCROLLABLE SINGLE-ROW NUMBERED CAPTION LINES (Exact match to Screenshot 2026-10-15 at 10.10.29 AM.png) */}
-            {isCaptionsSectionMinimized ? (
-              <div className="p-4 flex items-center justify-between text-xs text-zinc-400">
-                <span>Captions list minimized ({filteredSegments.length} lines)</span>
-                <button
-                  type="button"
-                  onClick={() => setIsCaptionsSectionMinimized(false)}
-                  className="px-3 py-1 rounded-lg bg-[#2BAE66] text-white font-semibold cursor-pointer"
-                >
-                  Expand
-                </button>
               </div>
             ) : (
               <div
@@ -1093,9 +1550,24 @@ export const TranscriptLanguagePanel: React.FC<TranscriptLanguagePanelProps> = (
                       currentTime >= seg.startTime && currentTime <= seg.endTime;
                     const primaryTrackObj =
                       seg.tracks[styleConfig.primaryTrack] || seg.tracks.tinglish;
-                    const primaryText = primaryTrackObj?.text || '';
-                    const primaryWords = primaryTrackObj?.words || [];
-                    const displayNum = seg.displayLineNumber ?? idx + 48;
+                    const enforceRoman = isRomanTrack(styleConfig.primaryTrack);
+                    const shouldStripEmojis = styleConfig.removeEmojis !== false;
+                    const shouldStripPunct = Boolean(styleConfig.removePunctuation);
+                    const sanitizePanelStr = (val: string) => {
+                      let out = enforceRoman ? transliterateIndicToRoman(val) : val;
+                      if (shouldStripEmojis) out = stripEmojisFromText(out);
+                      if (shouldStripPunct) out = stripPunctuationFromText(out);
+                      return out;
+                    };
+                    const rawPrimaryText = primaryTrackObj?.text || '';
+                    const primaryText = sanitizePanelStr(rawPrimaryText);
+                    const primaryWords = (primaryTrackObj?.words || [])
+                      .map((w) => ({
+                        ...w,
+                        word: sanitizePanelStr(w.word),
+                      }))
+                      .filter((w) => w.word.trim().length > 0);
+                    const displayNum = idx + 1;
                     const isLineStyleOpen = lineStylePopupSegId === seg.id;
                     const isEditingLine = editingSegmentId === seg.id;
                     const curArcDeg = seg.arcCurveDeg || 0;
@@ -1104,7 +1576,12 @@ export const TranscriptLanguagePanel: React.FC<TranscriptLanguagePanelProps> = (
                     return (
                       <div
                         key={seg.id}
-                        onClick={() => onSeekTo(seg.startTime + 0.02)}
+                        onClick={() => {
+                          onSeekTo(seg.startTime + 0.02);
+                          if (lineStylePopupSegId && lineStylePopupSegId !== seg.id) {
+                            setLineStylePopupSegId(null);
+                          }
+                        }}
                         onContextMenu={(e) => {
                           e.preventDefault();
                           e.stopPropagation();
@@ -1115,17 +1592,21 @@ export const TranscriptLanguagePanel: React.FC<TranscriptLanguagePanelProps> = (
                             segmentId: seg.id,
                           });
                         }}
-                        title="Click to seek · Right-click for Caption Tools & Line Options"
+                        title="Click line to seek · Click ⊞ on the right to open LINE STYLING pop-up"
                         className={`py-2.5 px-2.5 transition-colors cursor-pointer ${
-                          isActive ? 'bg-white/[0.03]' : 'hover:bg-white/[0.015]'
+                          isActive || isLineStyleOpen
+                            ? 'bg-white/[0.04]'
+                            : 'hover:bg-white/[0.015]'
                         }`}
                       >
                         <div className="flex items-center justify-between gap-3">
-                          {/* LEFT: Circular Numbered Line Badge (48, 49, 50, 51...) + Word Chips */}
+                          {/* LEFT: Circular Numbered Line Badge (1, 2, 3...) + Word Chips */}
                           <div className="flex items-center gap-3.5 min-w-0 flex-1 flex-wrap">
                             <span
                               className={`w-6 h-6 rounded-full text-[11px] font-mono tabular-nums flex items-center justify-center shrink-0 transition-colors ${
-                                isActive
+                                isLineStyleOpen
+                                  ? 'bg-[#24B47E] text-[#050505] font-bold'
+                                  : isActive
                                   ? 'bg-[#26262E] text-white font-semibold'
                                   : 'bg-[#1B1B22] text-zinc-400'
                               }`}
@@ -1193,11 +1674,13 @@ export const TranscriptLanguagePanel: React.FC<TranscriptLanguagePanelProps> = (
                                           segmentId: seg.id,
                                           wordIndex: wIdx,
                                         });
-                                        if (styleConfig.autoSfxEnabled) {
+                                        if (
+                                          Boolean(styleConfig.autoSfxEnabled) &&
+                                          seg.sfxType &&
+                                          seg.sfxType !== 'none'
+                                        ) {
                                           playOpenSourceSoundEffect(
-                                            seg.sfxType && seg.sfxType !== 'none'
-                                              ? seg.sfxType
-                                              : 'pop',
+                                            seg.sfxType,
                                             styleConfig.sfxVolume ?? 0.4
                                           );
                                         }
@@ -1224,11 +1707,28 @@ export const TranscriptLanguagePanel: React.FC<TranscriptLanguagePanelProps> = (
                             )}
                           </div>
 
-                          {/* RIGHT: 4 Minimal Kalakar Per-Line Action Icons (Arch ⌒, Move/Spread ✥, Behind Subject 🧍, Template ⊞) */}
+                          {/* RIGHT: Minimal Kalakar Per-Line Action Icons (Edit ✎, Arch ⌒, Move/Spread ✥, Behind Subject 🧍, Template ⊞) */}
                           <div
                             className="flex items-center gap-1.5 text-zinc-400 shrink-0"
                             onClick={(e) => e.stopPropagation()}
                           >
+                            {/* 0. Edit Line Text (✎) */}
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setEditingSegmentId((prev) =>
+                                  prev === seg.id ? null : seg.id
+                                )
+                              }
+                              title="Edit words in this caption line"
+                              className={`p-1 rounded-md transition-colors cursor-pointer ${
+                                isEditingLine
+                                  ? 'text-[#34D399] bg-[#163326]'
+                                  : 'hover:text-white hover:bg-white/[0.06]'
+                              }`}
+                            >
+                              <Edit3 className="w-3.5 h-3.5" />
+                            </button>
                             {/* 1. Curve into an arch (⌒) */}
                             <button
                               type="button"
@@ -1269,40 +1769,68 @@ export const TranscriptLanguagePanel: React.FC<TranscriptLanguagePanelProps> = (
                               <Move className="w-3.5 h-3.5" />
                             </button>
 
-                            {/* 3. Put behind the subject (🧍) */}
+                            {/* 3. Behind the Head (Disabled for now per user request — preserved in place for future activation) */}
                             <button
                               type="button"
-                              onClick={() => {
-                                const nextVal = !seg.behindSubject;
-                                onUpdateSegmentMeta?.(seg.id, {
-                                  behindSubject: nextVal,
-                                });
-                                if (nextVal && !styleConfig.captionDepthBehindSubject) {
-                                  onUpdateStyle?.({
-                                    captionDepthBehindSubject: true,
-                                    positionY: 31,
-                                  });
-                                }
-                              }}
-                              title="Placed caption behind subject (Depth Mask ON — Auto behind-head placement)"
-                              className={`p-1 rounded-md transition-colors cursor-pointer ${
-                                seg.behindSubject || styleConfig.captionDepthBehindSubject
-                                  ? 'text-[#34D399] bg-[#163326]'
-                                  : 'hover:text-white hover:bg-white/[0.06]'
-                              }`}
+                              disabled
+                              title="Behind the Head (Temporarily disabled — preserved for upcoming update)"
+                              className="p-1 rounded-md text-zinc-600 opacity-45 cursor-not-allowed"
                             >
                               <UserCheck className="w-3.5 h-3.5" />
                             </button>
 
-                            {/* 4. Apply a different template on this line (⊞) */}
+                            {/* 3.5 AI B-Roll Trigger on this Caption Line (Only visible when B-Roll is enabled) */}
+                            {Boolean(styleConfig.brollEnabled) &&
+                              (() => {
+                                const linkedSlot = aiBRollSlots.find(
+                                  (s) =>
+                                    (s.id === seg.aiBrollSlotId ||
+                                      s.linkedSegmentId === seg.id) &&
+                                    s.enabled !== false
+                                );
+                                const hasBroll = Boolean(
+                                  linkedSlot ||
+                                    (seg.aiBrollEnabled && seg.aiBrollCustomImageUrl)
+                                );
+                                return (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setLineStylePopupSegId((prev) =>
+                                        prev === seg.id ? null : seg.id
+                                      )
+                                    }
+                                    title={
+                                      linkedSlot
+                                        ? `AI B-Roll #${linkedSlot.slotNumber} (${linkedSlot.aspectRatio}) attached`
+                                        : 'Attach AI B-Roll Image to this caption line'
+                                    }
+                                    className={`px-1.5 py-0.5 rounded-md transition-colors cursor-pointer flex items-center gap-1 text-[9px] font-bold border ${
+                                      hasBroll
+                                        ? 'text-[#FDE047] bg-[#163326] border-[#2BAE66]/60'
+                                        : 'text-zinc-400 border-white/10 hover:text-white hover:bg-white/[0.06]'
+                                    }`}
+                                  >
+                                    <Sparkles className="w-3 h-3 shrink-0" />
+                                    <span>
+                                      {linkedSlot
+                                        ? `B-Roll #${linkedSlot.slotNumber}`
+                                        : '+ B-Roll'}
+                                    </span>
+                                  </button>
+                                );
+                              })()}
+
+                            {/* 4. Open LINE STYLING Compact Pop-up for this line (⊞) */}
                             <button
                               type="button"
-                              onClick={() =>
+                              onClick={() => {
+                                onSeekTo(seg.startTime + 0.02);
                                 setLineStylePopupSegId((prev) =>
                                   prev === seg.id ? null : seg.id
-                                )
-                              }
-                              title="Apply a different template or edit this line"
+                                );
+                              }}
+                              title="Open LINE STYLING Pop-up (Typography, Background, Position & Visual Templates)"
                               className={`p-1 rounded-md transition-colors cursor-pointer ${
                                 isLineStyleOpen || lineOverride.templateId
                                   ? 'text-[#34D399] bg-[#163326]'
@@ -1314,159 +1842,71 @@ export const TranscriptLanguagePanel: React.FC<TranscriptLanguagePanelProps> = (
                           </div>
                         </div>
 
-                        {/* INLINE LINE STYLING & EDIT POPUP (Opened when clicking ⊞ on a row) */}
-                        {isLineStyleOpen && (
+                        {/* GOLDOX SECTION 3.3: MOTHER / CHILD MAGIC WAND CASCADE BAR */}
+                        {activeWandSegId === seg.id && (
                           <div
                             onClick={(e) => e.stopPropagation()}
-                            className="mt-2.5 p-3 rounded-xl bg-[#18181F] border border-[#2BAE66]/40 space-y-2.5 text-[11px]"
+                            className="mt-2 p-2.5 rounded-xl bg-[#1A1812] border border-amber-400/40 flex flex-wrap items-center justify-between gap-2 text-[11px]"
                           >
-                            <div className="flex items-center justify-between border-b border-white/10 pb-1.5">
-                              <span className="font-bold text-[#34D399]">
-                                Line #{displayNum} Options &amp; Template Override
+                            <div className="flex items-center gap-1.5 text-amber-300 font-bold">
+                              <Wand2 className="w-3.5 h-3.5" />
+                              <span>
+                                Magic Wand: Set Line #{displayNum} as Mother Line &amp; cascade to:
                               </span>
-                              <div className="flex items-center gap-2">
+                            </div>
+                            <div className="flex items-center gap-1.5">
+                              {[2, 4, 8, 'all'].map((cnt) => (
                                 <button
-                                  type="button"
-                                  onClick={() => setEditingSegmentId(seg.id)}
-                                  className="px-2 py-0.5 rounded bg-[#252530] text-white flex items-center gap-1 cursor-pointer"
-                                >
-                                  <Edit3 className="w-3 h-3" />
-                                  <span>Edit Text</span>
-                                </button>
-                                <button
+                                  key={`wand-${seg.id}-${cnt}`}
                                   type="button"
                                   onClick={() => {
-                                    playOpenSourceSoundEffect(
-                                      seg.sfxType && seg.sfxType !== 'none'
-                                        ? seg.sfxType
-                                        : 'whoosh',
-                                      styleConfig.sfxVolume ?? 0.45
-                                    );
-                                  }}
-                                  className="px-2 py-0.5 rounded bg-[#163326] text-[#34D399] flex items-center gap-1 cursor-pointer"
-                                >
-                                  <Volume2 className="w-3 h-3" />
-                                  <span>SFX: {seg.sfxType || 'whoosh'}</span>
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => setLineStylePopupSegId(null)}
-                                  className="text-zinc-400 hover:text-white cursor-pointer"
-                                >
-                                  <X className="w-3.5 h-3.5" />
-                                </button>
-                              </div>
-                            </div>
-
-                            <div className="grid grid-cols-3 gap-2">
-                              <div>
-                                <label className="text-[10px] text-zinc-400 block mb-0.5">
-                                  Font Family
-                                </label>
-                                <select
-                                  value={lineOverride.fontFamily || styleConfig.fontFamily}
-                                  onChange={(e) =>
                                     onUpdateSegmentMeta?.(seg.id, {
-                                      lineStyleOverride: {
-                                        ...lineOverride,
-                                        fontFamily: e.target.value,
-                                      },
-                                    })
-                                  }
-                                  className="w-full bg-[#121216] text-white text-[10px] px-2 py-1 rounded border border-white/10"
-                                >
-                                  {AVAILABLE_FONTS.map((f) => (
-                                    <option key={f.name} value={f.name}>
-                                      {f.name}
-                                    </option>
-                                  ))}
-                                </select>
-                              </div>
-                              <div>
-                                <label className="text-[10px] text-zinc-400 block mb-0.5">
-                                  Line SFX Trigger
-                                </label>
-                                <select
-                                  value={seg.sfxType || 'whoosh'}
-                                  onChange={(e) => {
-                                    const nextSfx = e.target
-                                      .value as CaptionSegment['sfxType'];
-                                    onUpdateSegmentMeta?.(seg.id, { sfxType: nextSfx });
-                                    if (nextSfx && nextSfx !== 'none') {
-                                      playOpenSourceSoundEffect(nextSfx, 0.45);
-                                    }
-                                  }}
-                                  className="w-full bg-[#121216] text-[#34D399] text-[10px] px-2 py-1 rounded border border-white/10"
-                                >
-                                  <option value="whoosh">Whoosh Swipe</option>
-                                  <option value="bell">Crystal Bell</option>
-                                  <option value="pop">Bubble Pop</option>
-                                  <option value="cash">Cash Register</option>
-                                  <option value="riser">Cinema Riser</option>
-                                  <option value="impact">Bass Impact</option>
-                                  <option value="none">No SFX</option>
-                                </select>
-                              </div>
-                              <div>
-                                <label className="text-[10px] text-zinc-400 block mb-0.5">
-                                  AI B-Roll Cutaway
-                                </label>
-                                <select
-                                  value={seg.brollTheme || 'none'}
-                                  onChange={(e) => {
-                                    const val = e.target
-                                      .value as CaptionSegment['brollTheme'];
-                                    onUpdateSegmentMeta?.(seg.id, {
-                                      brollTheme: val,
-                                      brollTitle:
-                                        val === 'wealth'
-                                          ? 'Wealth & Compounding Visual'
-                                          : val === 'community'
-                                          ? 'Creator Community Cutaway'
-                                          : val === 'mindset'
-                                          ? 'High-Focus Studio Cutaway'
-                                          : undefined,
+                                      lineRole: 'mother',
+                                      motherSegmentId: undefined,
                                     });
-                                    if (val !== 'none') {
-                                      onUpdateStyle?.({ brollEnabled: true });
+                                    const startIdx = segments.findIndex(
+                                      (s) => s.id === seg.id
+                                    );
+                                    const limit =
+                                      cnt === 'all'
+                                        ? segments.length
+                                        : startIdx + 1 + Number(cnt);
+                                    for (
+                                      let k = startIdx + 1;
+                                      k < Math.min(segments.length, limit);
+                                      k++
+                                    ) {
+                                      const childSeg = segments[k];
+                                      onUpdateSegmentMeta?.(childSeg.id, {
+                                        lineRole: 'child',
+                                        motherSegmentId: seg.id,
+                                        lineStyleOverride: {
+                                          ...(seg.lineStyleOverride || {}),
+                                        },
+                                        line1FontSizePx: seg.line1FontSizePx,
+                                        line2FontSizePx: seg.line2FontSizePx,
+                                      });
                                     }
+                                    setActiveWandSegId(null);
                                   }}
-                                  className="w-full bg-[#121216] text-amber-300 text-[10px] px-2 py-1 rounded border border-white/10"
+                                  className="px-2 py-0.5 rounded bg-amber-500 hover:bg-amber-400 text-zinc-950 font-bold text-[10px] cursor-pointer"
                                 >
-                                  <option value="none">No B-Roll</option>
-                                  <option value="wealth">Wealth / Revenue B-Roll</option>
-                                  <option value="mindset">Mindset / Focus B-Roll</option>
-                                  <option value="community">Community / Team B-Roll</option>
-                                </select>
-                              </div>
-                            </div>
-
-                            {/* Quick Per-Line Templates */}
-                            <div className="grid grid-cols-4 gap-1 max-h-20 overflow-y-auto">
-                              {filteredLineTemplates.slice(0, 12).map((tpl) => (
-                                <button
-                                  key={`lt-${tpl.id}`}
-                                  type="button"
-                                  onClick={() =>
-                                    onUpdateSegmentMeta?.(seg.id, {
-                                      lineStyleOverride: {
-                                        ...lineOverride,
-                                        templateId: tpl.id,
-                                        fontFamily: tpl.config.fontFamily,
-                                        primaryColor: tpl.config.primaryColor,
-                                        secondaryColor: tpl.config.highlightColor,
-                                      },
-                                    })
-                                  }
-                                  className={`px-2 py-1 rounded text-[10px] font-medium truncate cursor-pointer border ${
-                                    lineOverride.templateId === tpl.id
-                                      ? 'bg-[#2BAE66] text-white border-[#2BAE66]'
-                                      : 'bg-[#121216] text-zinc-300 border-white/5 hover:border-white/20'
-                                  }`}
-                                >
-                                  {tpl.name}
+                                  {cnt === 'all' ? 'All Following' : `Next ${cnt} Lines`}
                                 </button>
                               ))}
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  onUpdateSegmentMeta?.(seg.id, {
+                                    lineRole: 'none',
+                                    motherSegmentId: undefined,
+                                  });
+                                  setActiveWandSegId(null);
+                                }}
+                                className="px-2 py-0.5 rounded bg-zinc-800 text-zinc-300 text-[10px] cursor-pointer"
+                              >
+                                Unlink
+                              </button>
                             </div>
                           </div>
                         )}
@@ -1475,25 +1915,55 @@ export const TranscriptLanguagePanel: React.FC<TranscriptLanguagePanelProps> = (
                   })}
                 </div>
 
-                {/* Subtle Floating Scroll Up / Down Arrows on Bottom Right */}
-                <div className="absolute right-2.5 bottom-2.5 flex flex-col gap-1 z-20">
-                  <button
-                    type="button"
-                    onClick={() => scrollCaptionsList(-220)}
-                    title="Scroll Up"
-                    className="w-6 h-6 rounded-full bg-[#1E1E24]/90 hover:bg-[#2BAE66] text-zinc-300 hover:text-white border border-white/10 flex items-center justify-center cursor-pointer shadow-md"
-                  >
-                    <ArrowUp className="w-3 h-3" />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => scrollCaptionsList(220)}
-                    title="Scroll Down"
-                    className="w-6 h-6 rounded-full bg-[#1E1E24]/90 hover:bg-[#2BAE66] text-zinc-300 hover:text-white border border-white/10 flex items-center justify-center cursor-pointer shadow-md"
-                  >
-                    <ArrowDown className="w-3 h-3" />
-                  </button>
-                </div>
+                {/* COMPACT FLOATING LINE STYLING POP-UP WINDOW (Exact Match to Screenshot 2 — Floats on right side next to ⊞ buttons) */}
+                {lineStylePopupSegId &&
+                  (() => {
+                    const popupSegIndex = segments.findIndex(
+                      (s) => s.id === lineStylePopupSegId
+                    );
+                    const popupSeg =
+                      popupSegIndex >= 0 ? segments[popupSegIndex] : undefined;
+                    if (!popupSeg) return null;
+                    return (
+                      <div
+                        className="absolute right-8 sm:right-10 top-2 z-50"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <KalakarLineStylingPanel
+                          segment={popupSeg}
+                          lineNumber={popupSegIndex + 1}
+                          styleConfig={styleConfig}
+                          userPresets={presets}
+                          customFonts={customFonts}
+                          onUpdateLineOverride={(nextOverride) => {
+                            onUpdateSegmentMeta?.(popupSeg.id, {
+                              lineStyleOverride: nextOverride,
+                            });
+                            if (popupSeg.lineRole === 'mother') {
+                              segments.forEach((cSeg) => {
+                                if (
+                                  cSeg.lineRole === 'child' &&
+                                  cSeg.motherSegmentId === popupSeg.id
+                                ) {
+                                  onUpdateSegmentMeta?.(cSeg.id, {
+                                    lineStyleOverride: nextOverride,
+                                  });
+                                }
+                              });
+                            }
+                          }}
+                          onUpdateSegmentMeta={(partial) =>
+                            onUpdateSegmentMeta?.(popupSeg.id, partial)
+                          }
+                          onUpdateGlobalStyle={(partial) =>
+                            onUpdateStyle?.(partial)
+                          }
+                          onEditText={() => setEditingSegmentId(popupSeg.id)}
+                          onClose={() => setLineStylePopupSegId(null)}
+                        />
+                      </div>
+                    );
+                  })()}
               </div>
             )}
           </>

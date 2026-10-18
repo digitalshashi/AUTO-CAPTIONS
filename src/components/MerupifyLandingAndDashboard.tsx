@@ -1491,15 +1491,16 @@ export const MerupifyLandingPage: React.FC<MerupifyLandingPageProps> = ({
 };
 
 /* ============================================================================
-   THE DASHBOARD APP ("THE APP" — MerupifyDashboardApp)
-   Opened after signing in from the Landing Page. Connects directly to the
-   3-Column Video & Caption Studio Editor, AI B-Roll Generator, SFX & Exports.
+   MINIMAL POST-LOGIN UPLOAD HOME ("THE APP" — MerupifyDashboardApp)
+   Minimal dark workspace opened immediately after login where the user uploads
+   their video or picks a recent video to open the minimal Studio Editing Panel.
    ============================================================================ */
 
 export type MerupifyDashboardTab =
-  | 'overview'
-  | 'projects'
-  | 'broll-sfx';
+  | 'home'
+  | 'tutorials'
+  | 'subscription'
+  | 'plugins';
 
 interface MerupifyDashboardAppProps {
   user: MerupifyUser;
@@ -1525,6 +1526,7 @@ interface MerupifyDashboardAppProps {
   onExportSRT: () => void;
   onExportWAV: () => void;
   onOpenStudioEditor: () => void;
+  onOpenCostEstimator?: () => void;
   onBackToLandingPage: () => void;
   onLogout: () => void;
 }
@@ -1532,23 +1534,24 @@ interface MerupifyDashboardAppProps {
 export const MerupifyDashboardApp: React.FC<MerupifyDashboardAppProps> = ({
   user,
   userPlan,
-  styleConfig,
   audioEnhancer,
   uploadedVideoName,
   activeSampleReel,
+  onSelectPlan,
   onUpdateStyle,
   onUploadVideoFile,
   onOpenRecordCamera,
-  onOpenPrepareMedia,
   onSelectSampleReelAndEdit,
-  onGenerateAiBrollNow,
+  onExportPremiereXML,
+  onExportAlphaWebM,
   onOpenStudioEditor,
+  onOpenCostEstimator,
   onBackToLandingPage,
   onLogout,
 }) => {
-  const [activeTab, setActiveTab] = useState<MerupifyDashboardTab>('overview');
+  const [activeTab, setActiveTab] = useState<MerupifyDashboardTab>('home');
   const [searchQuery, setSearchQuery] = useState('');
-  const [ratioFilter, setRatioFilter] = useState<'all' | VideoAspectRatio>('all');
+  const [isDraggingOver, setIsDraggingOver] = useState(false);
   const [customProjects, setCustomProjects] = useState<DashboardProjectItem[]>(() =>
     SAMPLE_REELS.map((reel, idx) => ({
       id: reel.id,
@@ -1557,7 +1560,7 @@ export const MerupifyDashboardApp: React.FC<MerupifyDashboardAppProps> = ({
       duration: reel.duration,
       aspectRatio: idx === 1 ? '16:9' : idx === 2 ? '1:1' : '9:16',
       primaryTrack: 'tinglish',
-      updatedAt: idx === 0 ? 'Just now' : `${idx + 1}h ago`,
+      updatedAt: idx === 0 ? 'Sample Reel' : `${idx + 1}d ago`,
       brollCount: 4 + idx,
       sfxEnabled: true,
       status: 'Ready to Export',
@@ -1566,11 +1569,12 @@ export const MerupifyDashboardApp: React.FC<MerupifyDashboardAppProps> = ({
   );
 
   const filteredProjects = customProjects.filter((proj) => {
-    const matchesSearch =
-      proj.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      proj.dialect.toLowerCase().includes(searchQuery.toLowerCase());
-    const matchesRatio = ratioFilter === 'all' || proj.aspectRatio === ratioFilter;
-    return matchesSearch && matchesRatio;
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return true;
+    return (
+      proj.title.toLowerCase().includes(q) ||
+      proj.dialect.toLowerCase().includes(q)
+    );
   });
 
   const navItems: {
@@ -1578,69 +1582,66 @@ export const MerupifyDashboardApp: React.FC<MerupifyDashboardAppProps> = ({
     label: string;
     icon: React.FC<{ className?: string }>;
   }[] = [
-    { id: 'overview', label: 'Editing Dashboard', icon: LayoutDashboard },
-    { id: 'projects', label: 'My Video Projects', icon: FolderKanban },
-    { id: 'broll-sfx', label: 'AI B-Roll & Sound FX', icon: Wand2 },
+    { id: 'home', label: 'Home & Upload', icon: Upload },
+    { id: 'tutorials', label: 'Tutorials', icon: BookOpen },
+    { id: 'subscription', label: 'Manage Subscription', icon: CreditCard },
+    { id: 'plugins', label: 'Premiere & Resolve', icon: Cpu },
   ];
 
   const audioCleansLeft = audioEnhancer.remainingCredits ?? 3;
 
   return (
-    <div className="min-h-screen bg-[#090A0F] text-zinc-100 flex flex-col lg:flex-row">
+    <div className="min-h-screen bg-[#0D0D10] text-zinc-100 flex flex-col lg:flex-row select-none">
       {/* =====================================================================
-          LEFT SIDEBAR NAVIGATION (264px width)
+          MINIMAL LEFT SIDEBAR (236px width — Clean Kalakar Studio Shell)
          ===================================================================== */}
-      <aside className="w-full lg:w-[264px] bg-[#0F111A] border-b lg:border-b-0 lg:border-r border-white/[0.08] p-4 flex flex-col justify-between shrink-0">
-        <div className="space-y-5">
+      <aside className="w-full lg:w-[236px] bg-[#121216] border-b lg:border-b-0 lg:border-r border-white/[0.06] p-3.5 flex flex-col justify-between shrink-0">
+        <div className="space-y-4">
           {/* App Brand Lockup */}
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2.5">
-              <div className="w-7 h-7 rounded-lg bg-[#FF5A1F] flex items-center justify-center text-zinc-950 font-display font-black text-sm">
+          <div className="flex items-center justify-between px-1">
+            <button
+              type="button"
+              onClick={onBackToLandingPage}
+              className="flex items-center gap-2.5 text-left cursor-pointer"
+              title="Back to Landing Page"
+            >
+              <div className="w-6 h-6 rounded-md bg-gradient-to-br from-[#FF5722] via-[#FFD60A] to-[#2BAE66] flex items-center justify-center text-zinc-950 font-black text-xs shadow-sm">
                 M
               </div>
-              <div>
-                <div className="text-sm font-display font-bold text-white leading-none">
-                  Merupify App
-                </div>
-                <div className="text-[11px] text-zinc-400 mt-0.5">Creator Workspace</div>
-              </div>
-            </div>
+              <span className="text-sm font-display font-bold text-white tracking-tight">
+                Merupify
+              </span>
+            </button>
+
             <button
               type="button"
               onClick={onOpenStudioEditor}
-              className="lg:hidden px-3 py-1.5 rounded-lg bg-[#FF5A1F] text-zinc-950 text-xs font-bold cursor-pointer"
+              className="lg:hidden px-2.5 py-1 rounded-lg bg-[#2BAE66] text-white text-xs font-semibold cursor-pointer"
             >
-              Open Editor
+              Editor →
             </button>
           </div>
 
-          {/* Primary Launch Studio Editor CTA */}
-          <button
-            type="button"
-            onClick={onOpenStudioEditor}
-            className="w-full py-2.5 px-3.5 rounded-xl bg-[#FF5A1F] hover:bg-[#FF6E3A] text-zinc-950 font-bold text-xs flex items-center justify-between transition-colors cursor-pointer shadow-sm"
-          >
-            <span className="flex items-center gap-2">
-              <Film className="w-4 h-4" />
-              <span>Open Studio Editor</span>
-            </span>
-            <ArrowRight className="w-3.5 h-3.5" />
-          </button>
-
-          {/* Search Input */}
+          {/* Search Videos Input (⌘K) */}
           <div className="relative">
-            <Search className="w-3.5 h-3.5 text-zinc-400 absolute left-3 top-1/2 -translate-y-1/2" />
+            <Search className="w-3.5 h-3.5 text-zinc-500 absolute left-2.5 top-1/2 -translate-y-1/2" />
             <input
               type="text"
               value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search projects... (⌘K)"
-              className="w-full bg-[#090A0F] border border-white/10 rounded-lg pl-8 pr-3 py-1.5 text-xs text-white focus:outline-none focus:border-[#FF5A1F]"
+              onChange={(e) => {
+                setSearchQuery(e.target.value);
+                if (activeTab !== 'home') setActiveTab('home');
+              }}
+              placeholder="Search by title…"
+              className="w-full bg-[#18181E] border border-white/[0.07] rounded-lg pl-8 pr-8 py-1.5 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-[#2BAE66]"
             />
+            <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] font-mono text-zinc-500">
+              ⌘K
+            </span>
           </div>
 
-          {/* Navigation Menu */}
-          <nav className="space-y-1">
+          {/* Minimal Navigation Links */}
+          <nav className="space-y-0.5">
             {navItems.map((item) => {
               const Icon = item.icon;
               const active = activeTab === item.id;
@@ -1649,13 +1650,13 @@ export const MerupifyDashboardApp: React.FC<MerupifyDashboardAppProps> = ({
                   key={item.id}
                   type="button"
                   onClick={() => setActiveTab(item.id)}
-                  className={`w-full px-3 py-2 rounded-lg text-xs font-medium flex items-center gap-2.5 transition-colors cursor-pointer ${
+                  className={`w-full px-2.5 py-2 rounded-lg text-xs font-medium flex items-center gap-2.5 transition-colors cursor-pointer ${
                     active
-                      ? 'bg-white/[0.09] text-white font-semibold'
+                      ? 'bg-[#172A21] text-[#34D399] font-semibold'
                       : 'text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-200'
                   }`}
                 >
-                  <Icon className={`w-4 h-4 shrink-0 ${active ? 'text-[#FF5A1F]' : ''}`} />
+                  <Icon className="w-3.5 h-3.5 shrink-0" />
                   <span className="truncate">{item.label}</span>
                 </button>
               );
@@ -1663,64 +1664,69 @@ export const MerupifyDashboardApp: React.FC<MerupifyDashboardAppProps> = ({
           </nav>
         </div>
 
-        {/* Bottom Usage Meters & Logged-In User Profile */}
-        <div className="space-y-4 pt-4 mt-4 border-t border-white/[0.08]">
-          <div className="space-y-2">
+        {/* Bottom Compact Usage Meters & User Profile */}
+        <div className="space-y-3 pt-3 mt-4 border-t border-white/[0.06]">
+          <div className="space-y-2 px-1">
             <div className="flex items-center justify-between text-[11px]">
-              <span className="text-zinc-400 font-medium">Workspace Plan: {userPlan.toUpperCase()}</span>
-              <span className="text-emerald-400 font-semibold">Active</span>
+              <span className="text-zinc-400 font-medium capitalize">{userPlan} Plan</span>
+              <button
+                type="button"
+                onClick={() => setActiveTab('subscription')}
+                className="text-[#34D399] hover:underline text-[11px] font-medium cursor-pointer"
+              >
+                Upgrade
+              </button>
             </div>
 
             <div className="space-y-1">
-              <div className="flex justify-between text-[11px] text-zinc-300">
+              <div className="flex justify-between text-[10px] text-zinc-400">
                 <span>Storage</span>
-                <span className="font-mono tabular-nums">0.42 / 1.00 GB</span>
+                <span className="font-mono tabular-nums">0.38 / 1.00 GB</span>
               </div>
-              <div className="h-1.5 rounded-full bg-zinc-800 overflow-hidden">
-                <div className="h-full w-[42%] bg-sky-400 rounded-full" />
+              <div className="h-1 rounded-full bg-zinc-800 overflow-hidden">
+                <div className="h-full w-[38%] bg-zinc-400 rounded-full" />
               </div>
             </div>
 
             <div className="space-y-1">
-              <div className="flex justify-between text-[11px] text-zinc-300">
+              <div className="flex justify-between text-[10px] text-zinc-400">
                 <span>Transcription</span>
-                <span className="font-mono tabular-nums">14:20 / 30:00 mins</span>
+                <span className="font-mono tabular-nums">0:45 / 2:00 mins</span>
               </div>
-              <div className="h-1.5 rounded-full bg-zinc-800 overflow-hidden">
-                <div className="h-full w-[48%] bg-emerald-400 rounded-full" />
+              <div className="h-1 rounded-full bg-zinc-800 overflow-hidden">
+                <div className="h-full w-[37%] bg-[#2BAE66] rounded-full" />
               </div>
             </div>
 
             <div className="space-y-1">
-              <div className="flex justify-between text-[11px] text-zinc-300">
-                <span>Audio Cleans</span>
-                <span className="font-mono tabular-nums">{audioCleansLeft} / 3 left</span>
+              <div className="flex justify-between text-[10px] text-zinc-400">
+                <span>Audio cleans</span>
+                <span className="font-mono tabular-nums">{audioCleansLeft} / 3</span>
               </div>
-              <div className="h-1.5 rounded-full bg-zinc-800 overflow-hidden">
+              <div className="h-1 rounded-full bg-zinc-800 overflow-hidden">
                 <div
-                  className="h-full bg-amber-400 rounded-full"
+                  className="h-full bg-[#2BAE66] rounded-full"
                   style={{ width: `${Math.min(100, Math.round((audioCleansLeft / 3) * 100))}%` }}
                 />
               </div>
             </div>
           </div>
 
-          {/* User Profile & Sign Out */}
-          <div className="p-2.5 rounded-xl bg-[#090A0F] border border-white/[0.07] flex items-center justify-between gap-2">
+          {/* User Row */}
+          <div className="px-2 py-2 rounded-lg bg-[#16161C] border border-white/[0.06] flex items-center justify-between gap-2">
             <div className="flex items-center gap-2 min-w-0">
-              <div className="w-7 h-7 rounded-full bg-[#1C2030] border border-white/10 flex items-center justify-center text-xs font-bold text-[#FF5A1F] shrink-0">
+              <div className="w-6 h-6 rounded-full bg-zinc-700 flex items-center justify-center text-[11px] font-bold text-white shrink-0">
                 {user.name.charAt(0).toUpperCase()}
               </div>
               <div className="min-w-0">
-                <div className="text-xs font-semibold text-white truncate">{user.name}</div>
-                <div className="text-[10px] text-zinc-400 truncate">{user.email}</div>
+                <div className="text-xs font-medium text-zinc-200 truncate">{user.name}</div>
               </div>
             </div>
             <button
               type="button"
               onClick={onLogout}
-              title="Sign Out to Landing Page"
-              className="p-1.5 rounded-lg text-zinc-400 hover:text-rose-400 hover:bg-white/5 transition-colors cursor-pointer shrink-0"
+              title="Sign Out"
+              className="p-1 rounded text-zinc-400 hover:text-rose-400 cursor-pointer shrink-0"
             >
               <LogOut className="w-3.5 h-3.5" />
             </button>
@@ -1729,501 +1735,313 @@ export const MerupifyDashboardApp: React.FC<MerupifyDashboardAppProps> = ({
       </aside>
 
       {/* =====================================================================
-          MAIN DASHBOARD VIEWPORT
+          MINIMAL MAIN CONTENT AREA (Upload Video + Recent Videos)
          ===================================================================== */}
       <div className="flex-1 flex flex-col min-w-0">
-        {/* Dashboard Top Bar Contract: Breadcrumb on Left, Primary Actions on Right */}
-        <header className="h-14 px-6 border-b border-white/[0.08] bg-[#0C0E16] flex items-center justify-between gap-4 shrink-0">
-          <div className="flex items-center gap-2 text-xs text-zinc-400 min-w-0">
-            <span className="font-semibold text-white whitespace-nowrap">Merupify App</span>
-            <span aria-hidden="true">/</span>
-            <span className="text-zinc-200 truncate">
+        {/* Clean Minimal Top Header */}
+        <header className="h-12 px-6 border-b border-white/[0.06] bg-[#111115] flex items-center justify-between gap-4 shrink-0">
+          <div className="flex items-center gap-2 text-xs text-zinc-300">
+            <span className="font-semibold text-white">
               {navItems.find((n) => n.id === activeTab)?.label}
-            </span>
-            <span aria-hidden="true" className="hidden sm:inline">
-              ·
-            </span>
-            <span className="hidden sm:inline text-zinc-400 truncate">
-              Active Project: {uploadedVideoName || activeSampleReel.title}
             </span>
           </div>
 
-          <div className="flex items-center gap-2.5 shrink-0">
-            <button
-              type="button"
-              onClick={onBackToLandingPage}
-              className="px-3 py-1.5 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] text-xs font-medium text-zinc-300 hover:text-white transition-colors cursor-pointer whitespace-nowrap shrink-0"
-            >
-              Landing Page
-            </button>
-            <button
-              type="button"
-              onClick={onOpenPrepareMedia}
-              className="px-3.5 py-1.5 rounded-lg bg-[#1A1D29] hover:bg-[#232736] border border-white/10 text-xs font-semibold text-white transition-colors cursor-pointer whitespace-nowrap shrink-0"
-            >
-              Prepare Media (101 Languages)
-            </button>
+          <div className="flex items-center gap-2">
+            {onOpenCostEstimator && (
+              <button
+                type="button"
+                onClick={onOpenCostEstimator}
+                className="px-3 py-1.5 rounded-lg bg-[#1A1A21] hover:bg-[#24242D] border border-white/[0.08] text-zinc-200 text-xs font-medium transition-colors cursor-pointer whitespace-nowrap shrink-0"
+              >
+                Cost Estimator ($ / ₹)
+              </button>
+            )}
             <button
               type="button"
               onClick={onOpenStudioEditor}
-              className="px-4 py-1.5 rounded-lg bg-[#FF5A1F] hover:bg-[#FF6E3A] text-zinc-950 text-xs font-bold transition-colors cursor-pointer whitespace-nowrap shrink-0"
+              className="px-3.5 py-1.5 rounded-lg bg-[#2BAE66] hover:bg-[#249957] text-white text-xs font-semibold transition-colors cursor-pointer flex items-center gap-1.5 whitespace-nowrap shrink-0"
             >
-              Open Studio Editor →
+              <span>Open Studio Editor</span>
+              <ArrowRight className="w-3.5 h-3.5" />
             </button>
           </div>
         </header>
 
-        {/* Scrollable Content Area */}
-        <main className="flex-1 overflow-y-auto p-6 lg:p-8 space-y-8 max-w-[1280px] w-full mx-auto">
-          {/* =================================================================
-              TAB 1: DASHBOARD OVERVIEW
-             ================================================================= */}
-          {activeTab === 'overview' && (
-            <div className="space-y-8">
-              {/* Welcome Banner + Quick Upload & Camera Capture */}
-              <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
-                {/* Upload Dropzone (7 cols) */}
-                <label className="lg:col-span-7 border-2 border-dashed border-[#FF5A1F]/40 hover:border-[#FF5A1F] rounded-2xl p-6 bg-[#12141D] flex flex-col items-center justify-center text-center space-y-3 transition-colors cursor-pointer">
-                  <div className="w-11 h-11 rounded-xl bg-[#FF5A1F]/15 text-[#FF5A1F] flex items-center justify-center">
-                    <Upload className="w-5 h-5" />
-                  </div>
-                  <div className="space-y-1">
-                    <div className="text-base font-display font-bold text-white">
-                      Upload Reel or Video to Generate 100% Verbatim Captions
-                    </div>
-                    <p className="text-xs text-zinc-400">
-                      Drag and drop MP4, MOV, or WebM · Extracts 16 kHz audio locally for instant
-                      Tinglish, Hinglish &amp; 101-language transcription
-                    </p>
-                  </div>
-                  <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
-                    <span className="px-4 py-2 rounded-lg bg-[#FF5A1F] text-zinc-950 font-bold text-xs">
-                      Select Video File
-                    </span>
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.preventDefault();
-                        onOpenRecordCamera();
-                      }}
-                      className="px-3.5 py-2 rounded-lg bg-[#1A1D29] hover:bg-[#25293A] border border-white/10 text-xs font-semibold text-white cursor-pointer"
-                    >
-                      Record from Camera
-                    </button>
-                  </div>
-                  <input
-                    type="file"
-                    accept="video/*,audio/*"
-                    className="hidden"
-                    onChange={(e) => {
-                      const f = e.target.files?.[0];
-                      if (f) onUploadVideoFile(f);
-                    }}
-                  />
-                </label>
+        {/* Main Body */}
+        <main className="flex-1 overflow-y-auto p-6 lg:p-10 max-w-4xl w-full mx-auto space-y-8">
+          {activeTab === 'home' && (
+            <>
+              {/* PRIMARY VIDEO UPLOAD DROPZONE (Immediately opens the minimal Studio Editor on upload) */}
+              <label
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  setIsDraggingOver(true);
+                }}
+                onDragLeave={() => setIsDraggingOver(false)}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  setIsDraggingOver(false);
+                  const f = e.dataTransfer.files?.[0];
+                  if (f) onUploadVideoFile(f);
+                }}
+                className={`block rounded-2xl border-2 border-dashed p-10 text-center transition-all cursor-pointer ${
+                  isDraggingOver
+                    ? 'border-[#2BAE66] bg-[#152E23]/30'
+                    : 'border-white/15 hover:border-[#2BAE66]/60 bg-[#131318]'
+                }`}
+              >
+                <div className="w-12 h-12 rounded-2xl bg-[#1A1A22] border border-white/10 flex items-center justify-center mx-auto mb-3 text-[#34D399]">
+                  <Upload className="w-5 h-5" />
+                </div>
 
-                {/* Active Workspace Quick Controls (5 cols) */}
-                <div className="lg:col-span-5 bg-[#12141D] border border-white/[0.08] rounded-2xl p-5 flex flex-col justify-between space-y-4">
-                  <div className="space-y-1">
-                    <div className="text-xs text-zinc-400">Active Studio Configuration</div>
-                    <h3 className="text-base font-display font-bold text-white truncate">
-                      {uploadedVideoName || activeSampleReel.title}
-                    </h3>
-                  </div>
+                <div className="text-base font-semibold text-white">
+                  Drag and drop your video, or click to upload
+                </div>
+                <p className="text-xs text-zinc-400 mt-1">
+                  Supported formats: MP4, MOV, WebM · Automatically generates word-by-word captions
+                  and opens the Studio Editor
+                </p>
 
-                  {/* Aspect Ratio Selector (9:16 | 16:9 | 1:1) */}
-                  <div className="space-y-1.5">
-                    <div className="text-xs font-medium text-zinc-300">
-                      Canvas Format &amp; Safe-Zone Ratio
-                    </div>
-                    <div className="grid grid-cols-3 gap-1.5 p-1 bg-[#090A0F] rounded-xl border border-white/10">
-                      {(['9:16', '16:9', '1:1'] as VideoAspectRatio[]).map((ratio) => {
-                        const active = (styleConfig.aspectRatio || '9:16') === ratio;
-                        return (
-                          <button
-                            key={ratio}
-                            type="button"
-                            onClick={() => onUpdateStyle({ aspectRatio: ratio })}
-                            className={`py-1.5 rounded-lg text-xs font-mono tabular-nums font-semibold cursor-pointer ${
-                              active
-                                ? 'bg-[#FF5A1F] text-zinc-950'
-                                : 'text-zinc-400 hover:text-white'
-                            }`}
-                          >
-                            {ratio}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-
-                  {/* Quick Toggles for AI B-Roll & Open-Source Sound Effects */}
-                  <div className="grid grid-cols-2 gap-2">
-                    <button
-                      type="button"
-                      onClick={() =>
-                        onUpdateStyle({ brollEnabled: !styleConfig.brollEnabled })
-                      }
-                      className={`p-2.5 rounded-xl border text-left transition-colors cursor-pointer ${
-                        styleConfig.brollEnabled
-                          ? 'bg-amber-500/15 border-amber-400/40 text-amber-200'
-                          : 'bg-[#090A0F] border-white/10 text-zinc-400'
-                      }`}
-                    >
-                      <div className="text-xs font-bold">AI B-Roll Cutaways</div>
-                      <div className="text-[10px] opacity-80">
-                        {styleConfig.brollEnabled ? 'Enabled on Timeline' : 'Disabled'}
-                      </div>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const next = !styleConfig.autoSfxEnabled;
-                        onUpdateStyle({ autoSfxEnabled: next });
-                        if (next) playOpenSourceSoundEffect('whoosh', 0.45);
-                      }}
-                      className={`p-2.5 rounded-xl border text-left transition-colors cursor-pointer ${
-                        styleConfig.autoSfxEnabled
-                          ? 'bg-emerald-500/15 border-emerald-400/40 text-emerald-200'
-                          : 'bg-[#090A0F] border-white/10 text-zinc-400'
-                      }`}
-                    >
-                      <div className="text-xs font-bold">Auto Sound FX</div>
-                      <div className="text-[10px] opacity-80">
-                        {styleConfig.autoSfxEnabled ? 'Whoosh / Ding / Pop ON' : 'Muted'}
-                      </div>
-                    </button>
-                  </div>
-
+                <div className="flex flex-wrap items-center justify-center gap-2.5 mt-5">
+                  <span className="px-4 py-2 rounded-lg bg-[#2BAE66] hover:bg-[#249957] text-white text-xs font-semibold shadow-sm">
+                    Upload Video
+                  </span>
                   <button
                     type="button"
-                    onClick={onOpenStudioEditor}
-                    className="w-full py-2.5 px-4 rounded-xl bg-white hover:bg-zinc-200 text-zinc-950 font-bold text-xs flex items-center justify-center gap-2 transition-colors cursor-pointer"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      onOpenRecordCamera();
+                    }}
+                    className="px-3.5 py-2 rounded-lg bg-[#1C1C23] hover:bg-[#25252E] border border-white/10 text-xs font-medium text-zinc-200 cursor-pointer"
                   >
-                    <span>Continue Editing in Studio</span>
-                    <ArrowRight className="w-3.5 h-3.5" />
+                    Record Camera
                   </button>
                 </div>
-              </div>
 
-              {/* 4-Column KPI Summary Strip */}
-              <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-                <div className="bg-[#12141D] border border-white/[0.08] rounded-xl p-4 space-y-1">
-                  <div className="text-xs text-zinc-400">Recent Projects</div>
-                  <div className="text-2xl font-display font-bold text-white tabular-nums">
-                    {customProjects.length} Reels
-                  </div>
-                  <div className="text-[11px] text-zinc-400">9:16, 16:9 &amp; 1:1 formats ready</div>
-                </div>
-                <div className="bg-[#12141D] border border-white/[0.08] rounded-xl p-4 space-y-1">
-                  <div className="text-xs text-zinc-400">Active Script Track</div>
-                  <div className="text-2xl font-display font-bold text-[#FF5A1F] uppercase">
-                    {styleConfig.primaryTrack}
-                  </div>
-                  <div className="text-[11px] text-zinc-400">
-                    Mode: {styleConfig.displayMode === 'dual-stacked' ? 'Dual-Line' : 'Single-Line'}
-                  </div>
-                </div>
-                <div className="bg-[#12141D] border border-white/[0.08] rounded-xl p-4 space-y-1">
-                  <div className="text-xs text-zinc-400">Open-Source Sound FX</div>
-                  <div className="text-2xl font-display font-bold text-emerald-400 tabular-nums">
-                    {OPEN_SOURCE_SFX_LIBRARY.length} Packs
-                  </div>
-                  <div className="text-[11px] text-zinc-400">Whoosh, Bell, Pop, Riser, Impact</div>
-                </div>
-                <div className="bg-[#12141D] border border-white/[0.08] rounded-xl p-4 space-y-1">
-                  <div className="text-xs text-zinc-400">AI Audio Enhancer</div>
-                  <div className="text-2xl font-display font-bold text-sky-400 tabular-nums">
-                    -{audioEnhancer.noiseReductionDb} dB
-                  </div>
-                  <div className="text-[11px] text-zinc-400">
-                    {audioEnhancer.enabled ? 'Noise gate active' : 'Ready for 1-click clean'}
-                  </div>
-                </div>
-              </div>
+                <input
+                  type="file"
+                  accept="video/*,audio/*"
+                  className="hidden"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    if (f) onUploadVideoFile(f);
+                    e.target.value = '';
+                  }}
+                />
+              </label>
 
-              {/* Recent Videos & Projects Table / Grid */}
-              <div className="space-y-4">
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div>
-                    <h3 className="text-base font-display font-bold text-white">
-                      Recent Videos &amp; Caption Projects
-                    </h3>
-                    <p className="text-xs text-zinc-400">
-                      Click any project to open it inside the 3-Column Studio Editor
-                    </p>
-                  </div>
+              {/* RECENT VIDEOS SECTION */}
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-sm font-semibold text-white">Recent Videos</h2>
+                  <span className="text-xs text-zinc-500">
+                    Click any video to open in Studio Editor
+                  </span>
+                </div>
 
-                  <div className="flex items-center gap-1 p-1 bg-[#12141D] rounded-lg border border-white/10">
-                    {(['all', '9:16', '16:9', '1:1'] as const).map((r) => (
-                      <button
-                        key={r}
-                        type="button"
-                        onClick={() => setRatioFilter(r)}
-                        className={`px-2.5 py-1 rounded text-xs font-semibold cursor-pointer ${
-                          ratioFilter === r
-                            ? 'bg-[#FF5A1F] text-zinc-950'
-                            : 'text-zinc-400 hover:text-white'
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3.5">
+                  {/* If user already uploaded a video in this session, show it first */}
+                  {uploadedVideoName && (
+                    <div
+                      onClick={onOpenStudioEditor}
+                      className="group bg-[#131318] border border-[#2BAE66]/50 hover:border-[#2BAE66] rounded-xl p-3.5 flex flex-col justify-between gap-3 cursor-pointer transition-all"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="w-8 h-8 rounded-lg bg-[#172A21] text-[#34D399] flex items-center justify-center shrink-0">
+                          <Play className="w-4 h-4 fill-current" />
+                        </div>
+                        <span className="text-[11px] font-mono text-[#34D399]">Uploaded</span>
+                      </div>
+                      <div>
+                        <div className="text-xs font-semibold text-white truncate">
+                          {uploadedVideoName}
+                        </div>
+                        <div className="text-[11px] text-zinc-400 mt-0.5">
+                          Active session video · Click to edit
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {filteredProjects.map((proj) => {
+                    const isActiveSample =
+                      !uploadedVideoName && activeSampleReel.id === proj.id;
+                    return (
+                      <div
+                        key={proj.id}
+                        onClick={() => {
+                          onUpdateStyle({ aspectRatio: proj.aspectRatio });
+                          if (proj.sampleReel) {
+                            onSelectSampleReelAndEdit(proj.sampleReel);
+                          } else {
+                            onOpenStudioEditor();
+                          }
+                        }}
+                        className={`group bg-[#131318] border rounded-xl p-3.5 flex flex-col justify-between gap-3 cursor-pointer transition-all ${
+                          isActiveSample
+                            ? 'border-white/25'
+                            : 'border-white/[0.07] hover:border-white/20'
                         }`}
                       >
-                        {r === 'all' ? 'All Ratios' : r}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                  {filteredProjects.map((proj) => (
-                    <div
-                      key={proj.id}
-                      className="bg-[#12141D] border border-white/[0.08] hover:border-[#FF5A1F]/50 rounded-2xl p-4 flex flex-col justify-between space-y-4 transition-colors"
-                    >
-                      <div className="space-y-2">
-                        <div className="flex items-center justify-between text-xs text-zinc-400">
+                        <div className="flex items-center justify-between text-[11px] text-zinc-400">
                           <span className="font-mono tabular-nums">{proj.aspectRatio}</span>
                           <span>·</span>
                           <span className="font-mono tabular-nums">{proj.duration}s</span>
-                          <span>·</span>
-                          <span>{proj.updatedAt}</span>
-                        </div>
-                        <h4 className="text-sm font-display font-bold text-white">{proj.title}</h4>
-                        <p className="text-xs text-zinc-400">{proj.dialect}</p>
-                        <div className="text-[11px] text-zinc-400 pt-1">
-                          <span>{proj.brollCount} AI B-Roll cues</span>
-                          <span aria-hidden="true"> · </span>
-                          <span>{proj.sfxEnabled ? 'Auto SFX ON' : 'SFX Muted'}</span>
-                        </div>
-                      </div>
-
-                      <div className="flex items-center gap-2 pt-2 border-t border-white/[0.07]">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            onUpdateStyle({ aspectRatio: proj.aspectRatio });
-                            if (proj.sampleReel) {
-                              onSelectSampleReelAndEdit(proj.sampleReel);
-                            } else {
-                              onOpenStudioEditor();
-                            }
-                          }}
-                          className="flex-1 py-2 px-3 rounded-lg bg-[#FF5A1F] hover:bg-[#FF6E3A] text-zinc-950 font-bold text-xs cursor-pointer text-center"
-                        >
-                          Open in Studio Editor
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setCustomProjects((prev) => prev.filter((p) => p.id !== proj.id))
-                          }
-                          title="Remove project"
-                          className="p-2 rounded-lg bg-white/5 hover:bg-rose-500/20 text-zinc-400 hover:text-rose-300 cursor-pointer"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* =================================================================
-              TAB 2: PROJECTS & REELS
-             ================================================================= */}
-          {activeTab === 'projects' && (
-            <div className="space-y-6">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <h2 className="text-xl font-display font-bold text-white">
-                    All Projects &amp; Uploaded Reels
-                  </h2>
-                  <p className="text-xs text-zinc-400">
-                    Manage your vertical 9:16 reels, 16:9 YouTube videos, and 1:1 square posts
-                  </p>
-                </div>
-                <label className="px-4 py-2 rounded-lg bg-[#FF5A1F] hover:bg-[#FF6E3A] text-zinc-950 font-bold text-xs flex items-center gap-2 cursor-pointer">
-                  <Plus className="w-4 h-4" />
-                  <span>Upload New Video</span>
-                  <input
-                    type="file"
-                    accept="video/*,audio/*"
-                    className="hidden"
-                    onChange={(e) => {
-                      const f = e.target.files?.[0];
-                      if (f) onUploadVideoFile(f);
-                    }}
-                  />
-                </label>
-              </div>
-
-              <div className="bg-[#12141D] border border-white/[0.08] rounded-2xl overflow-hidden">
-                <table className="w-full text-left border-collapse">
-                  <thead>
-                    <tr className="border-b border-white/[0.08] text-[11px] text-zinc-400">
-                      <th className="py-3 px-4 font-semibold">Project Title</th>
-                      <th className="py-3 px-4 font-semibold">Spoken Dialect &amp; Track</th>
-                      <th className="py-3 px-4 font-semibold">Format</th>
-                      <th className="py-3 px-4 font-semibold text-right">Duration</th>
-                      <th className="py-3 px-4 font-semibold text-right">Action</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-white/[0.06] text-xs">
-                    {filteredProjects.map((proj) => (
-                      <tr key={proj.id} className="hover:bg-white/[0.02]">
-                        <td className="py-3 px-4 font-semibold text-white">{proj.title}</td>
-                        <td className="py-3 px-4 text-zinc-300">{proj.dialect}</td>
-                        <td className="py-3 px-4 font-mono tabular-nums text-zinc-300">
-                          {proj.aspectRatio}
-                        </td>
-                        <td className="py-3 px-4 font-mono tabular-nums text-zinc-300 text-right">
-                          {proj.duration}s
-                        </td>
-                        <td className="py-3 px-4 text-right">
                           <button
                             type="button"
-                            onClick={() => {
-                              onUpdateStyle({ aspectRatio: proj.aspectRatio });
-                              if (proj.sampleReel) onSelectSampleReelAndEdit(proj.sampleReel);
-                              else onOpenStudioEditor();
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setCustomProjects((prev) =>
+                                prev.filter((p) => p.id !== proj.id)
+                              );
                             }}
-                            className="px-3 py-1.5 rounded-lg bg-[#FF5A1F] text-zinc-950 font-bold text-xs cursor-pointer"
+                            title="Remove"
+                            className="ml-auto text-zinc-500 hover:text-rose-400 p-0.5 cursor-pointer"
                           >
-                            Edit in Studio
+                            <Trash2 className="w-3 h-3" />
                           </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+                        </div>
+
+                        <div>
+                          <div className="text-xs font-semibold text-white group-hover:text-[#34D399] transition-colors truncate">
+                            {proj.title}
+                          </div>
+                          <div className="text-[11px] text-zinc-400 truncate mt-0.5">
+                            {proj.dialect}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
+            </>
+          )}
+
+          {activeTab === 'tutorials' && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              {KALAKAR_ACADEMY_TUTORIALS.map((tut) => (
+                <div
+                  key={tut.id}
+                  className="p-4 rounded-xl bg-[#131318] border border-white/[0.07] flex flex-col justify-between space-y-3"
+                >
+                  <div className="space-y-1">
+                    <div className="text-[11px] text-zinc-400">
+                      <span>{tut.category}</span>
+                      <span aria-hidden="true"> · </span>
+                      <span className="font-mono">{tut.duration}</span>
+                    </div>
+                    <h3 className="text-sm font-semibold text-white">{tut.title}</h3>
+                    <p className="text-xs text-zinc-400 leading-relaxed">{tut.desc}</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={onOpenStudioEditor}
+                    className="w-full py-2 rounded-lg bg-[#1B1B22] hover:bg-[#25252E] text-xs font-medium text-white cursor-pointer"
+                  >
+                    Open in Studio Editor
+                  </button>
+                </div>
+              ))}
             </div>
           )}
 
-          {/* =================================================================
-              TAB 3: AI B-ROLL & OPEN-SOURCE SOUND EFFECTS STUDIO
-             ================================================================= */}
-          {activeTab === 'broll-sfx' && (
-            <div className="space-y-6">
-              <div className="flex flex-wrap items-center justify-between gap-4">
-                <div>
-                  <h2 className="text-xl font-display font-bold text-white">
-                    AI B-Roll Generator &amp; Open-Source Sound Effects Lab
-                  </h2>
-                  <p className="text-xs text-zinc-400">
-                    Automatically generate context-matched B-roll visuals using Gemini and trigger
-                    open-source sound effects on caption entrance
-                  </p>
+          {activeTab === 'subscription' && (
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              {(
+                [
+                  {
+                    id: 'free',
+                    name: 'Free',
+                    price: '₹0',
+                    desc: 'Max 2:00 mins per video · 101 languages · 3 Audio Cleans',
+                  },
+                  {
+                    id: 'creator',
+                    name: 'Creator Pro',
+                    price: '₹599/mo',
+                    desc: 'All 48 templates · Auto Translation · Behind-Head Depth Mask',
+                  },
+                  {
+                    id: 'pro',
+                    name: 'Agency Studio',
+                    price: '₹1,499/mo',
+                    desc: 'Unlimited 4K exports · Premiere & DaVinci Resolve XML/Alpha',
+                  },
+                ] as const
+              ).map((plan) => {
+                const isCurrent = userPlan === plan.id;
+                return (
+                  <div
+                    key={plan.id}
+                    className={`p-5 rounded-xl border flex flex-col justify-between space-y-4 ${
+                      isCurrent
+                        ? 'bg-[#14241C] border-[#2BAE66]'
+                        : 'bg-[#131318] border-white/[0.08]'
+                    }`}
+                  >
+                    <div className="space-y-1.5">
+                      <div className="text-sm font-semibold text-white">{plan.name}</div>
+                      <div className="text-xl font-bold text-white font-mono">
+                        {plan.price}
+                      </div>
+                      <p className="text-xs text-zinc-400 leading-relaxed">{plan.desc}</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => onSelectPlan(plan.id)}
+                      className={`w-full py-2 rounded-lg text-xs font-semibold cursor-pointer ${
+                        isCurrent
+                          ? 'bg-[#2BAE66]/20 text-[#34D399]'
+                          : 'bg-[#2BAE66] text-white hover:bg-[#249957]'
+                      }`}
+                    >
+                      {isCurrent ? 'Active Plan' : `Switch to ${plan.name}`}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {activeTab === 'plugins' && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="p-5 rounded-xl bg-[#131318] border border-white/[0.08] space-y-3">
+                <div className="text-sm font-semibold text-white">
+                  Adobe Premiere Pro &amp; DaVinci Resolve (.FCPXML)
                 </div>
+                <p className="text-xs text-zinc-400">
+                  Export editable timeline XML with synced caption layers directly into Premiere Pro or Resolve.
+                </p>
                 <button
                   type="button"
-                  onClick={() => {
-                    onGenerateAiBrollNow();
-                    onOpenStudioEditor();
-                  }}
-                  className="px-4 py-2 rounded-xl bg-[#FF5A1F] hover:bg-[#FF6E3A] text-zinc-950 font-bold text-xs flex items-center gap-2 cursor-pointer"
+                  onClick={onExportPremiereXML}
+                  className="px-4 py-2 rounded-lg bg-[#2BAE66] text-white text-xs font-semibold cursor-pointer"
                 >
-                  <Sparkles className="w-4 h-4" />
-                  <span>Generate Gemini AI B-Roll &amp; Open Editor</span>
+                  Download .FCPXML Timeline
                 </button>
               </div>
 
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                {/* B-Roll Configuration Card */}
-                <div className="bg-[#12141D] border border-white/[0.08] rounded-2xl p-5 space-y-4">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <h3 className="text-sm font-display font-bold text-white">
-                        Automatic Context B-Roll Cutaways
-                      </h3>
-                      <p className="text-xs text-zinc-400">
-                        Inserts picture-in-picture or full-frame cutaways matched to spoken keywords
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        onUpdateStyle({ brollEnabled: !styleConfig.brollEnabled })
-                      }
-                      className={`px-3 py-1.5 rounded-lg text-xs font-bold cursor-pointer ${
-                        styleConfig.brollEnabled
-                          ? 'bg-emerald-500 text-zinc-950'
-                          : 'bg-zinc-800 text-zinc-300'
-                      }`}
-                    >
-                      {styleConfig.brollEnabled ? 'Enabled' : 'Disabled'}
-                    </button>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-2">
-                    {(['pip', 'fullscreen'] as const).map((mode) => (
-                      <button
-                        key={mode}
-                        type="button"
-                        onClick={() =>
-                          onUpdateStyle({ brollEnabled: true, brollDisplayMode: mode })
-                        }
-                        className={`p-3 rounded-xl border text-xs font-semibold capitalize cursor-pointer ${
-                          (styleConfig.brollDisplayMode || 'pip') === mode
-                            ? 'bg-[#1D1916] border-[#FF5A1F] text-white'
-                            : 'bg-[#090A0F] border-white/10 text-zinc-400'
-                        }`}
-                      >
-                        {mode === 'pip' ? 'Picture-in-Picture Card' : 'Full-Screen Cutaway'}
-                      </button>
-                    ))}
-                  </div>
+              <div className="p-5 rounded-xl bg-[#131318] border border-white/[0.08] space-y-3">
+                <div className="text-sm font-semibold text-white">
+                  Transparent Alpha Channel Overlay (.WEBM)
                 </div>
-
-                {/* Open-Source Sound Effects Audition & Auto-Trigger Card */}
-                <div className="bg-[#12141D] border border-white/[0.08] rounded-2xl p-5 space-y-4">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <h3 className="text-sm font-display font-bold text-white">
-                        Open-Source Sound Effects (CC0 WebAudio Engine)
-                      </h3>
-                      <p className="text-xs text-zinc-400">
-                        Click any sound below to audition; automatically plays on caption cues
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        onUpdateStyle({ autoSfxEnabled: !styleConfig.autoSfxEnabled })
-                      }
-                      className={`px-3 py-1.5 rounded-lg text-xs font-bold cursor-pointer ${
-                        styleConfig.autoSfxEnabled
-                          ? 'bg-emerald-500 text-zinc-950'
-                          : 'bg-zinc-800 text-zinc-300'
-                      }`}
-                    >
-                      {styleConfig.autoSfxEnabled ? 'Auto SFX: ON' : 'Auto SFX: OFF'}
-                    </button>
-                  </div>
-
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                    {OPEN_SOURCE_SFX_LIBRARY.map((sfx) => (
-                      <button
-                        key={sfx.id}
-                        type="button"
-                        onClick={() =>
-                          playOpenSourceSoundEffect(sfx.id, styleConfig.sfxVolume ?? 0.5)
-                        }
-                        className="p-2.5 rounded-xl bg-[#090A0F] hover:bg-white/[0.06] border border-white/10 text-left transition-colors cursor-pointer"
-                      >
-                        <div className="text-xs font-bold text-white truncate">{sfx.name}</div>
-                        <div className="text-[10px] text-zinc-400 truncate">{sfx.description}</div>
-                      </button>
-                    ))}
-                  </div>
-                </div>
+                <p className="text-xs text-zinc-400">
+                  Render caption-only transparent video track to drop onto your V2 lane in any NLE.
+                </p>
+                <button
+                  type="button"
+                  onClick={onExportAlphaWebM}
+                  className="px-4 py-2 rounded-lg bg-[#1C1C24] hover:bg-[#252530] border border-white/10 text-white text-xs font-semibold cursor-pointer"
+                >
+                  Export Alpha .WEBM
+                </button>
               </div>
             </div>
           )}
-
         </main>
       </div>
     </div>
   );
 };
+

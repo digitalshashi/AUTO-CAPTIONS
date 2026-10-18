@@ -384,32 +384,41 @@ export const PremiereMultiTrackTimeline: React.FC<PremiereMultiTrackTimelineProp
     return buildSyllabicDialogueWaveform(duration || 12, segments, 1600);
   }, [highDensityWaveform, duration, segments]);
 
-  // Compute combined Whoosh / Wash SFX markers from segments, B-rolls, and user-added Whoosh cues
+  // Compute combined Whoosh / Wash SFX markers only from segments with explicit SFX or when autoSfxEnabled is on
   const allWhooshMarkers = useMemo<WhooshMarker[]>(() => {
     const autoMarkers: WhooshMarker[] = [];
-    // Place automatic Whoosh/Wash transition spikes at key caption hooks & B-roll entrances
     segments.forEach((seg, idx) => {
-      if (idx === 0 || idx % 2 === 1 || seg.sfxType) {
+      const hasExplicitSfx = Boolean(seg.sfxType && seg.sfxType !== 'none');
+      if (hasExplicitSfx || (Boolean(styleConfig.autoSfxEnabled) && (idx === 0 || idx % 2 === 1))) {
         autoMarkers.push({
           id: `auto-whoosh-${seg.id}`,
           time: Number(Math.max(0.18, seg.startTime).toFixed(2)),
           duration: 0.48,
-          label: seg.sfxType ? seg.sfxType.toUpperCase() : idx === 0 ? 'HOOK WHOOSH' : 'WASH SWISH',
+          label: hasExplicitSfx ? seg.sfxType!.toUpperCase() : idx === 0 ? 'HOOK WHOOSH' : 'WASH SWISH',
           intensity: idx === 0 ? 0.96 : 0.84,
         });
       }
     });
-    brollClips.forEach((b) => {
-      autoMarkers.push({
-        id: `broll-whoosh-${b.id}`,
-        time: b.startTime,
-        duration: 0.52,
-        label: 'B-ROLL WHOOSH',
-        intensity: 0.92,
+    if (Boolean(styleConfig.brollEnabled) && Boolean(styleConfig.aiBrollSfxEnabled)) {
+      brollClips.forEach((b) => {
+        autoMarkers.push({
+          id: `broll-whoosh-${b.id}`,
+          time: b.startTime,
+          duration: 0.52,
+          label: 'B-ROLL WHOOSH',
+          intensity: 0.92,
+        });
       });
-    });
+    }
     return [...autoMarkers, ...customWhooshMarkers].sort((a, b) => a.time - b.time);
-  }, [segments, brollClips, customWhooshMarkers]);
+  }, [
+    segments,
+    brollClips,
+    customWhooshMarkers,
+    styleConfig.autoSfxEnabled,
+    styleConfig.brollEnabled,
+    styleConfig.aiBrollSfxEnabled,
+  ]);
 
   // Compute high-density Music + Whoosh SFX dual-envelope waveform
   const musicAndWhooshWaveformData = useMemo(() => {
@@ -1036,7 +1045,7 @@ export const PremiereMultiTrackTimeline: React.FC<PremiereMultiTrackTimelineProp
       ...tracksConfig,
       broll: { ...tracksConfig.broll, enabled: true, visible: true },
     });
-    if (styleConfig.autoSfxEnabled !== false) {
+    if (Boolean(styleConfig.autoSfxEnabled)) {
       playOpenSourceSoundEffect('whoosh', styleConfig.sfxVolume ?? 0.45);
     }
     onShowToast(
@@ -1113,6 +1122,9 @@ export const PremiereMultiTrackTimeline: React.FC<PremiereMultiTrackTimelineProp
   ) => {
     const curr = tracksConfig[trackId];
     const nextVal = !curr[prop];
+    if (trackId === 'broll' && (prop === 'enabled' || prop === 'visible')) {
+      onUpdateStyle({ brollEnabled: nextVal });
+    }
     onUpdateTracksConfig({
       ...tracksConfig,
       [trackId]: {
@@ -1124,6 +1136,9 @@ export const PremiereMultiTrackTimeline: React.FC<PremiereMultiTrackTimelineProp
 
   const minimizeTrack = (trackId: TrackId) => {
     const curr = tracksConfig[trackId];
+    if (trackId === 'broll') {
+      onUpdateStyle({ brollEnabled: false });
+    }
     onUpdateTracksConfig({
       ...tracksConfig,
       [trackId]: {
@@ -1131,7 +1146,7 @@ export const PremiereMultiTrackTimeline: React.FC<PremiereMultiTrackTimelineProp
         enabled: false,
       },
     });
-    onShowToast(`Minimized "${curr.label}" track — click + ${curr.label} in toolbar to restore anytime.`);
+    onShowToast(`Minimized "${curr.label}" track — click Tracks in toolbar to restore anytime.`);
   };
 
   // Compute millisecond ruler ticks
@@ -1146,8 +1161,11 @@ export const PremiereMultiTrackTimeline: React.FC<PremiereMultiTrackTimelineProp
   }, [duration]);
 
   const activeTrackCount = useMemo(
-    () => Object.values(tracksConfig).filter((t) => t.enabled).length,
-    [tracksConfig]
+    () =>
+      Object.values(tracksConfig).filter((t) =>
+        t.id === 'broll' ? t.enabled && Boolean(styleConfig.brollEnabled) : t.enabled
+      ).length,
+    [tracksConfig, styleConfig.brollEnabled]
   );
 
   if (isMinimized) {
@@ -1179,8 +1197,12 @@ export const PremiereMultiTrackTimeline: React.FC<PremiereMultiTrackTimelineProp
   return (
     <div
       className={`${
-        isExpandedHeight ? 'h-[350px]' : activeTrackCount > 3 ? 'h-[268px]' : 'h-[218px]'
-      } shrink-0 bg-[#111215] border-t border-white/[0.08] flex flex-col select-none transition-all duration-150 relative`}
+        isExpandedHeight
+          ? 'h-full lg:h-[350px]'
+          : activeTrackCount > 3
+          ? 'h-full lg:h-[268px]'
+          : 'h-full lg:h-[218px]'
+      } flex-1 lg:flex-initial min-h-0 shrink-0 bg-[#111215] border-t border-white/[0.08] flex flex-col select-none transition-all duration-150 relative`}
     >
       {/* Hidden File Inputs for Importing Additional Video 2, Custom B-Roll, or Music Tracks */}
       <input
@@ -1389,14 +1411,13 @@ export const PremiereMultiTrackTimeline: React.FC<PremiereMultiTrackTimelineProp
               );
             }}
             title="Place caption behind subject's head (Real-Time AI Depth Mask ON/OFF)"
-            className={`px-2 py-1 rounded-lg border text-[10px] font-semibold flex items-center gap-1 transition-colors cursor-pointer shrink-0 ${
+            className={`p-1.5 rounded-lg transition-colors cursor-pointer shrink-0 ${
               styleConfig.captionDepthBehindSubject
-                ? 'bg-[#152E23] border-[#34D399]/60 text-[#34D399]'
-                : 'bg-[#1C1E24] border-white/[0.07] text-zinc-300 hover:text-white'
+                ? 'bg-[#152E23] text-[#34D399]'
+                : 'hover:bg-white/[0.07] text-zinc-400 hover:text-white'
             }`}
           >
             <PersonStanding className="w-3.5 h-3.5" />
-            <span>{styleConfig.captionDepthBehindSubject ? 'Behind Head: ON' : 'Behind Head'}</span>
           </button>
 
           {/* Delete Selected Clip / Word / Line (Trash) */}
@@ -1416,37 +1437,9 @@ export const PremiereMultiTrackTimeline: React.FC<PremiereMultiTrackTimelineProp
             type="button"
             onClick={handleRazorSplitAtPlayhead}
             title="Razor Cut / Split clip at playhead"
-            className="px-2 py-1 rounded-lg bg-[#1F242D] hover:bg-[#2B323F] border border-sky-500/30 text-sky-300 hover:text-white flex items-center gap-1 transition-colors cursor-pointer shrink-0"
+            className="p-1.5 rounded-lg hover:bg-white/[0.07] text-zinc-400 hover:text-white transition-colors cursor-pointer shrink-0"
           >
             <Scissors className="w-3.5 h-3.5" />
-            <span className="text-[10px] font-semibold">Cut</span>
-          </button>
-
-          {/* ]🗑[ RIPPLE DELETE / TRIM GAP */}
-          <button
-            type="button"
-            onClick={handleRippleDelete}
-            title="Ripple Delete: Remove selected clip segment and close gap"
-            className="px-1.5 py-1 rounded-lg hover:bg-white/[0.07] text-zinc-400 hover:text-white font-mono text-[10px] flex items-center gap-0.5 transition-colors cursor-pointer shrink-0"
-          >
-            <span>]</span>
-            <Trash2 className="w-3 h-3" />
-            <span>[</span>
-          </button>
-
-          {/* Magnet Snap Toggle */}
-          <button
-            type="button"
-            onClick={() => {
-              setSnapEnabled((s) => !s);
-              onShowToast(!snapEnabled ? 'Timeline Magnetic Snapping ON' : 'Magnetic Snapping OFF');
-            }}
-            title="Toggle Magnetic Snapping"
-            className={`p-1.5 rounded-lg transition-colors cursor-pointer ${
-              snapEnabled ? 'bg-white/[0.08] text-white' : 'text-zinc-500 hover:text-zinc-300'
-            }`}
-          >
-            <Magnet className="w-3.5 h-3.5" />
           </button>
 
           {/* LINK / UNLINK VIDEO & AUDIO */}
@@ -1458,91 +1451,20 @@ export const PremiereMultiTrackTimeline: React.FC<PremiereMultiTrackTimelineProp
                 ? 'Click to Separate (Unlink) Video 1 and Audio 1'
                 : 'Video 1 & Audio 1 are Separated! Click to re-link them'
             }
-            className={`px-2 py-1 rounded-lg border text-[10px] font-semibold flex items-center gap-1 transition-colors cursor-pointer shrink-0 ${
+            className={`p-1.5 rounded-lg transition-colors cursor-pointer shrink-0 ${
               !isVideoAudioLinked
-                ? 'bg-amber-500/15 border-amber-400/50 text-amber-300'
-                : 'bg-[#1B222C] border-white/[0.08] text-zinc-300 hover:text-white'
+                ? 'bg-amber-500/15 text-amber-300'
+                : 'hover:bg-white/[0.07] text-zinc-400 hover:text-white'
             }`}
           >
             {isVideoAudioLinked ? (
-              <>
-                <Link2 className="w-3.5 h-3.5 text-[#34D399]" />
-                <span>Linked</span>
-              </>
+              <Link2 className="w-3.5 h-3.5 text-[#34D399]" />
             ) : (
-              <>
-                <Unlink2 className="w-3.5 h-3.5 text-amber-400" />
-                <span>V/A Separated</span>
-              </>
+              <Unlink2 className="w-3.5 h-3.5 text-amber-400" />
             )}
           </button>
 
-          <div className="h-4 w-px bg-white/[0.08] mx-0.5" />
-
-          {/* 1-CLICK ADD / UN-MINIMIZE OPTIONAL TRACKS (B-Roll 1, Video 2, Music & Whoosh) */}
-          <button
-            type="button"
-            onClick={handleAddBrollClipAtPlayhead}
-            className={`px-2 py-1 rounded-lg border text-[10px] font-semibold flex items-center gap-1 cursor-pointer shrink-0 ${
-              tracksConfig.broll.enabled
-                ? 'bg-amber-500/20 border-amber-400/50 text-amber-200'
-                : 'bg-[#181B22] hover:bg-[#222630] border-amber-500/30 text-amber-300'
-            }`}
-            title="Show B-Roll 1 Track & Add Cutaway Clip at Playhead"
-          >
-            <Sparkles className="w-3 h-3" />
-            <span>+ B-Roll</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={handleEnableAndAddVideo2Track}
-            className={`px-2 py-1 rounded-lg border text-[10px] font-semibold flex items-center gap-1 cursor-pointer shrink-0 ${
-              tracksConfig.video2.enabled
-                ? 'bg-purple-500/20 border-purple-400/50 text-purple-200'
-                : 'bg-[#181B22] hover:bg-[#222630] border-purple-500/30 text-purple-300'
-            }`}
-            title="Show Video 2 Overlay Track (Minimize anytime when not required)"
-          >
-            <Film className="w-3 h-3" />
-            <span>+ Video 2</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => handleAddMusicOrWhooshAtPlayhead('whoosh')}
-            className={`px-2 py-1 rounded-lg border text-[10px] font-semibold flex items-center gap-1 cursor-pointer shrink-0 ${
-              tracksConfig.music.enabled
-                ? 'bg-indigo-500/25 border-indigo-400/60 text-indigo-200'
-                : 'bg-[#181B22] hover:bg-[#222630] border-indigo-500/35 text-indigo-300'
-            }`}
-            title="Show Music & Whoosh SFX Track with high-density wavelengths & Whoosh spikes"
-          >
-            <Wind className="w-3 h-3 text-amber-300" />
-            <span>+ Music &amp; Whoosh</span>
-          </button>
-
-          {/* Restore pills if user minimized any of the 3 core tracks (Captions, Video 1, Audio 1) */}
-          {(!tracksConfig.captions.enabled ||
-            !tracksConfig.video1.enabled ||
-            !tracksConfig.audio1.enabled) && (
-            <button
-              type="button"
-              onClick={() =>
-                onUpdateTracksConfig({
-                  ...tracksConfig,
-                  captions: { ...tracksConfig.captions, enabled: true },
-                  video1: { ...tracksConfig.video1, enabled: true },
-                  audio1: { ...tracksConfig.audio1, enabled: true },
-                })
-              }
-              className="px-2 py-1 rounded-lg bg-emerald-500/20 border border-emerald-400/40 text-emerald-300 text-[10px] font-semibold cursor-pointer shrink-0"
-              title="Restore default Captions, Video 1 & Audio 1 tracks"
-            >
-              Restore Core Tracks
-            </button>
-          )}
-
+          {/* Manage Visible & Optional Tracks Popover Button */}
           <button
             type="button"
             onClick={() => setShowTrackSelectorMenu((v) => !v)}
@@ -1551,7 +1473,7 @@ export const PremiereMultiTrackTimeline: React.FC<PremiereMultiTrackTimelineProp
                 ? 'bg-white text-zinc-950 border-white'
                 : 'bg-[#22242A] hover:bg-[#2B2E36] border-white/[0.08] text-zinc-200'
             }`}
-            title="Manage Visible & Minimized Tracks"
+            title="Manage Tracks (+ B-Roll, + Video 2, + Music)"
           >
             <Layers className="w-3 h-3" />
             <span>Tracks ({activeTrackCount})</span>
@@ -1627,79 +1549,82 @@ export const PremiereMultiTrackTimeline: React.FC<PremiereMultiTrackTimelineProp
           </div>
 
           <div className="space-y-1.5">
-            {(Object.keys(tracksConfig) as TrackId[]).map((tId) => {
-              const tr = tracksConfig[tId];
-              const isCore = tId === 'captions' || tId === 'video1' || tId === 'audio1';
-              return (
-                <div
-                  key={tId}
-                  className="flex items-center justify-between p-2 rounded-xl bg-[#111217] border border-white/[0.06]"
-                >
-                  <label className="flex items-center gap-2 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={tr.enabled}
-                      onChange={() => toggleTrackProp(tId, 'enabled')}
-                      className="accent-[#2BAE66] rounded cursor-pointer"
-                    />
-                    <span className="font-semibold text-zinc-200">{tr.label}</span>
-                    {isCore && (
-                      <span className="text-[9px] text-emerald-400/80 font-mono">DEFAULT</span>
-                    )}
-                  </label>
-                  <div className="flex items-center gap-1">
-                    <button
-                      type="button"
-                      onClick={() => toggleTrackProp(tId, 'visible')}
-                      className={`p-1 rounded cursor-pointer ${
-                        tr.visible ? 'text-[#34D399]' : 'text-zinc-600'
-                      }`}
-                      title="Toggle Canvas Visibility"
-                    >
-                      {tr.visible ? (
-                        <Eye className="w-3.5 h-3.5" />
-                      ) : (
-                        <EyeOff className="w-3.5 h-3.5" />
+            {(Object.keys(tracksConfig) as TrackId[])
+              .filter((tId) => (tId === 'broll' ? Boolean(styleConfig.brollEnabled) : true))
+              .map((tId) => {
+                const tr = tracksConfig[tId];
+                const isCore = tId === 'captions' || tId === 'video1' || tId === 'audio1';
+                return (
+                  <div
+                    key={tId}
+                    className="flex items-center justify-between p-2 rounded-xl bg-[#111217] border border-white/[0.06]"
+                  >
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={tr.enabled}
+                        onChange={() => toggleTrackProp(tId, 'enabled')}
+                        className="accent-[#2BAE66] rounded cursor-pointer"
+                      />
+                      <span className="font-semibold text-zinc-200">{tr.label}</span>
+                      {isCore && (
+                        <span className="text-[9px] text-emerald-400/80 font-mono">DEFAULT</span>
                       )}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => toggleTrackProp(tId, 'muted')}
-                      className={`p-1 rounded cursor-pointer ${
-                        tr.muted ? 'text-rose-400' : 'text-zinc-400'
-                      }`}
-                      title="Mute Track"
-                    >
-                      {tr.muted ? (
-                        <VolumeX className="w-3.5 h-3.5" />
-                      ) : (
-                        <Volume2 className="w-3.5 h-3.5" />
-                      )}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => toggleTrackProp(tId, 'locked')}
-                      className={`p-1 rounded cursor-pointer ${
-                        tr.locked ? 'text-amber-400' : 'text-zinc-500'
-                      }`}
-                      title="Lock Track"
-                    >
-                      {tr.locked ? (
-                        <Lock className="w-3.5 h-3.5" />
-                      ) : (
-                        <Unlock className="w-3.5 h-3.5" />
-                      )}
-                    </button>
+                    </label>
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => toggleTrackProp(tId, 'visible')}
+                        className={`p-1 rounded cursor-pointer ${
+                          tr.visible ? 'text-[#34D399]' : 'text-zinc-600'
+                        }`}
+                        title="Toggle Canvas Visibility"
+                      >
+                        {tr.visible ? (
+                          <Eye className="w-3.5 h-3.5" />
+                        ) : (
+                          <EyeOff className="w-3.5 h-3.5" />
+                        )}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => toggleTrackProp(tId, 'muted')}
+                        className={`p-1 rounded cursor-pointer ${
+                          tr.muted ? 'text-rose-400' : 'text-zinc-400'
+                        }`}
+                        title="Mute Track"
+                      >
+                        {tr.muted ? (
+                          <VolumeX className="w-3.5 h-3.5" />
+                        ) : (
+                          <Volume2 className="w-3.5 h-3.5" />
+                        )}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => toggleTrackProp(tId, 'locked')}
+                        className={`p-1 rounded cursor-pointer ${
+                          tr.locked ? 'text-amber-400' : 'text-zinc-500'
+                        }`}
+                        title="Lock Track"
+                      >
+                        {tr.locked ? (
+                          <Lock className="w-3.5 h-3.5" />
+                        ) : (
+                          <Unlock className="w-3.5 h-3.5" />
+                        )}
+                      </button>
+                    </div>
                   </div>
-                </div>
-              );
-            })}
+                );
+              })}
           </div>
 
           <div className="flex items-center justify-between pt-1 border-t border-white/10">
             <button
               type="button"
               onClick={() => {
+                onUpdateStyle({ brollEnabled: false });
                 onUpdateTracksConfig({
                   captions: { ...tracksConfig.captions, enabled: true, visible: true },
                   video1: { ...tracksConfig.video1, enabled: true, visible: true },
@@ -1718,32 +1643,36 @@ export const PremiereMultiTrackTimeline: React.FC<PremiereMultiTrackTimelineProp
           </div>
 
           <div className="grid grid-cols-2 gap-1.5 pt-1 border-t border-white/10">
-            <button
-              type="button"
-              onClick={() => {
-                onGenerateAiBroll();
-                onUpdateTracksConfig({
-                  ...tracksConfig,
-                  broll: { ...tracksConfig.broll, enabled: true, visible: true },
-                });
-                setShowTrackSelectorMenu(false);
-              }}
-              className="py-1.5 px-2.5 rounded-lg bg-[#152E23] text-[#34D399] font-semibold text-[11px] flex items-center justify-center gap-1 cursor-pointer"
-            >
-              <Wand2 className="w-3 h-3" />
-              <span>Auto AI B-Rolls</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                customBrollInputRef.current?.click();
-                setShowTrackSelectorMenu(false);
-              }}
-              className="py-1.5 px-2.5 rounded-lg bg-white/10 text-white font-semibold text-[11px] flex items-center justify-center gap-1 cursor-pointer"
-            >
-              <Upload className="w-3 h-3" />
-              <span>Import B-Roll</span>
-            </button>
+            {Boolean(styleConfig.brollEnabled) && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onGenerateAiBroll();
+                    onUpdateTracksConfig({
+                      ...tracksConfig,
+                      broll: { ...tracksConfig.broll, enabled: true, visible: true },
+                    });
+                    setShowTrackSelectorMenu(false);
+                  }}
+                  className="py-1.5 px-2.5 rounded-lg bg-[#152E23] text-[#34D399] font-semibold text-[11px] flex items-center justify-center gap-1 cursor-pointer"
+                >
+                  <Wand2 className="w-3 h-3" />
+                  <span>Auto AI B-Rolls</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    customBrollInputRef.current?.click();
+                    setShowTrackSelectorMenu(false);
+                  }}
+                  className="py-1.5 px-2.5 rounded-lg bg-white/10 text-white font-semibold text-[11px] flex items-center justify-center gap-1 cursor-pointer"
+                >
+                  <Upload className="w-3 h-3" />
+                  <span>Import B-Roll</span>
+                </button>
+              </>
+            )}
             <button
               type="button"
               onClick={() => {
@@ -1838,8 +1767,8 @@ export const PremiereMultiTrackTimeline: React.FC<PremiereMultiTrackTimelineProp
               </div>
             )}
 
-            {/* Track Header 2: B-Roll 1 Track (Optional — Minimize when not required!) */}
-            {tracksConfig.broll.enabled && (
+            {/* Track Header 2: B-Roll 1 Track (Only visible when B-Roll is enabled) */}
+            {Boolean(styleConfig.brollEnabled) && tracksConfig.broll.enabled && (
               <div className="h-10 px-2.5 flex items-center justify-between hover:bg-white/[0.02] bg-amber-500/[0.03]">
                 <div className="flex items-center gap-1.5 min-w-0">
                   <Sparkles className="w-3.5 h-3.5 text-amber-400 shrink-0" />
@@ -2278,9 +2207,9 @@ export const PremiereMultiTrackTimeline: React.FC<PremiereMultiTrackTimelineProp
               )}
 
               {/* =============================================================
-                  ROW 2: B-ROLL 1 TRACK (Optional — Minimized by default)
+                  ROW 2: B-ROLL 1 TRACK (Only visible when B-Roll is enabled)
                  ============================================================= */}
-              {tracksConfig.broll.enabled && (
+              {Boolean(styleConfig.brollEnabled) && tracksConfig.broll.enabled && (
                 <div
                   className={`relative h-10 bg-[#14131A] ${
                     !tracksConfig.broll.visible ? 'opacity-40' : ''

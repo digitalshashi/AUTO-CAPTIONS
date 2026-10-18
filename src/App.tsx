@@ -35,9 +35,14 @@ import {
   Link2,
   Trash2,
   UserCheck,
+  Calculator,
+  ChevronLeft,
+  ChevronRight,
+  Code2,
 } from 'lucide-react';
 import {
   ActiveCanvasLayer,
+  AIBRollSlot,
   AudioEnhancerConfig,
   CaptionSegment,
   CaptionStyleConfig,
@@ -56,16 +61,30 @@ import {
   STYLE_PRESETS,
 } from './data/presetsAndLanguages';
 import {
+  DEFAULT_VIDEO_CLIP_EDIT,
   injectEmojisIntoCaptionText,
+  stripEmojisFromText,
+  stripPunctuationFromText,
 } from './data/kalakarOptionsData';
 import {
+  ensureGoogleFontLoaded,
+  preloadCoreIndianAndEnglishGoogleFonts,
+} from './utils/googleFontsLibrary';
+import {
+  alignSegmentsToAudioWaveformPrecise,
   applyAutoHeroNLPToSegments,
   buildWordTimingsClient,
   exportStandaloneAudioWAV,
+  ExportFrameRate,
+  ExportResolution,
+  ExportTypeOption,
   extractAudioChunksFromVideo,
+  generateDaVinciResolveEDL,
   generatePremiereDaVinciXML,
+  generatePremiereProXMEML,
   generateSRTContent,
   generateVTTContent,
+  getExportResolutionDimensions,
   getSupportedExportMimeType,
   regroupSegmentsByWordsPerLine,
   shiftAndStretchSegments,
@@ -75,6 +94,7 @@ import {
   VideoExportFormat,
 } from './utils/audioExtractor';
 import {
+  clearCachedVideoFrame,
   getLatestLayerHitBoxes,
   renderReelCanvasFrame,
 } from './utils/canvasCaptionRenderer';
@@ -83,12 +103,15 @@ import {
   TranscriptLanguagePanel,
 } from './components/TranscriptLanguagePanel';
 import { StyleAnimationInspector } from './components/StyleAnimationInspector';
+import { ExportStudioDrawer } from './components/ExportStudioDrawer';
 import {
   PrepareYourMediaModal,
   KalakarShellHubModal,
   KalakarShellView,
 } from './components/KalakarAppShellModals';
 import { KalakarAgentAndTester } from './components/KalakarAgentAndTester';
+import { CloudCostEstimatorModal } from './components/CloudCostEstimatorModal';
+import { RemotionStudioModule } from './components/RemotionStudioModule';
 import {
   MerupifyDashboardApp,
   MerupifyLandingPage,
@@ -106,8 +129,18 @@ import {
 } from './utils/soundEffectsEngine';
 import { extractHighDensityWaveformFromFile } from './utils/audioWaveformAnalyzer';
 import { getLatestSubjectSegmentation } from './utils/depthSubjectSegmentation';
+import {
+  isRomanTrack,
+  sanitizeSegmentsRomanTracks,
+} from './utils/indicRomanTransliterator';
+import {
+  analyzeScriptForThreeBRolls,
+  createDefaultThreeBRollSlots,
+  generateBRollImageWithGemini,
+  playMagicalBRollSoundEffect,
+} from './utils/aiBRollGenerator';
 
-const PRESETS_STORAGE_KEY = 'vakyareel_sidz_presets_v3';
+const PRESETS_STORAGE_KEY = 'vakyareel_sidz_presets_v5';
 const AUTH_USER_STORAGE_KEY = 'merupify_auth_user_v1';
 
 export default function App() {
@@ -129,7 +162,13 @@ export default function App() {
       if (saved) {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed) && parsed.length > 0) {
-          return parsed;
+          return parsed.map((p: StylePreset) => ({
+            ...p,
+            config: {
+              ...p.config,
+              videoClipEdit: { ...DEFAULT_VIDEO_CLIP_EDIT },
+            },
+          }));
         }
       }
     } catch {
@@ -143,18 +182,33 @@ export default function App() {
       if (saved) {
         const parsed = JSON.parse(saved) as StylePreset[];
         if (Array.isArray(parsed) && parsed[0]?.config) {
+          const singleId = parsed[0].id || 'kalakar-lala';
           return {
             ...DEFAULT_STYLE_CONFIG,
             ...parsed[0].config,
-            presetId: parsed[0].id,
+            presetId: singleId,
+            kalakarTemplateId: singleId,
+            videoClipEdit: { ...DEFAULT_VIDEO_CLIP_EDIT },
+            canvasPositionLocked: false,
             showOnScreenTransformBoxes: false,
+            autoSfxEnabled: false,
+            aiBrollSfxEnabled: false,
           };
         }
       }
     } catch {
       // ignore
     }
-    return { ...DEFAULT_STYLE_CONFIG, showOnScreenTransformBoxes: false };
+    return {
+      ...DEFAULT_STYLE_CONFIG,
+      presetId: 'kalakar-lala',
+      kalakarTemplateId: 'kalakar-lala',
+      videoClipEdit: { ...DEFAULT_VIDEO_CLIP_EDIT },
+      canvasPositionLocked: false,
+      showOnScreenTransformBoxes: false,
+      autoSfxEnabled: false,
+      aiBrollSfxEnabled: false,
+    };
   });
 
   const [uploadedVideoUrl, setUploadedVideoUrl] = useState<string | null>(null);
@@ -174,6 +228,11 @@ export default function App() {
   const [audioWaveformBars, setAudioWaveformBars] = useState<number[]>([]);
   // Premiere Pro Separated vs Linked Video 1 & Audio 1 Mode (Separated by default so Video & Audio can be cut independently!)
   const [isVideoAudioLinked, setIsVideoAudioLinked] = useState<boolean>(false);
+  const [isCostEstimatorOpen, setIsCostEstimatorOpen] = useState<boolean>(false);
+  const [mobileWorkspaceTab, setMobileWorkspaceTab] = useState<
+    'edit' | 'captions' | 'timeline' | 'all' | 'video'
+  >('edit');
+  const [activeLineStylingSegmentId, setActiveLineStylingSegmentId] = useState<string | null>(null);
   const [tracksConfig, setTracksConfig] = useState<Record<TrackId, TrackConfig>>({
     captions: {
       id: 'captions',
@@ -297,6 +356,17 @@ export default function App() {
     },
   ]);
   const lastPlayedSfxSegIdRef = useRef<string | null>(null);
+  const lastPlayedBrollSlotRef = useRef<string | null>(null);
+
+  // AI Script-to-B-Roll 3-Image Studio State (9:16, 1:1, 16:9 + Magical Effects)
+  const [aiBRollSlots, setAiBRollSlots] = useState<AIBRollSlot[]>(() =>
+    createDefaultThreeBRollSlots(
+      SAMPLE_REELS[0].segments,
+      'tinglish',
+      '9:16'
+    )
+  );
+  const [isAnalyzingBRollScript, setIsAnalyzingBRollScript] = useState<boolean>(false);
 
   const [isTranscribing, setIsTranscribing] = useState<boolean>(false);
   const [transcribeStage, setTranscribeStage] = useState<string>('');
@@ -315,9 +385,13 @@ export default function App() {
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
+  const [isExportDrawerOpen, setIsExportDrawerOpen] = useState<boolean>(false);
   const [isExportingVideo, setIsExportingVideo] = useState<boolean>(false);
   const [exportProgress, setExportProgress] = useState<number>(0);
   const [exportFormat, setExportFormat] = useState<VideoExportFormat>('mp4');
+  const [exportResolution, setExportResolution] = useState<ExportResolution>('1080p');
+  const [exportFps, setExportFps] = useState<ExportFrameRate>(60);
+  const [exportType, setExportType] = useState<ExportTypeOption>('video');
   const stopExportEarlyRef = useRef<boolean>(false);
 
   const [isCameraModalOpen, setIsCameraModalOpen] = useState<boolean>(false);
@@ -327,10 +401,36 @@ export default function App() {
     'workspace' | 'languages' | 'style' | 'export'
   >('workspace');
 
+  // Dynamic Left Column Width & Collapse Toggle State (Captions Top + NLE Timeline Bottom)
+  const [leftColumnWidthPx, setLeftColumnWidthPx] = useState<number>(500);
+  const [isLeftColumnCollapsed, setIsLeftColumnCollapsed] = useState<boolean>(false);
+  const isResizingLeftColRef = useRef<boolean>(false);
+
+  // Dedicated Remotion Module vs Standard Merupify Studio Switcher State
+  const [studioModuleMode, setStudioModuleMode] = useState<'standard' | 'remotion'>('standard');
+
   // Kalakar.io Website Hero & Features State (Collapsed by default so user lands directly in clean Studio)
   const [showKalakarHero, setShowKalakarHero] = useState<boolean>(false);
   const [userPlan, setUserPlan] = useState<'free' | 'creator' | 'pro'>('free');
   const [customFonts, setCustomFonts] = useState<string[]>([]);
+
+  useEffect(() => {
+    preloadCoreIndianAndEnglishGoogleFonts();
+  }, []);
+
+  useEffect(() => {
+    if (styleConfig.fontFamily) ensureGoogleFontLoaded(styleConfig.fontFamily);
+    if (styleConfig.heroWordFontFamily) {
+      ensureGoogleFontLoaded(styleConfig.heroWordFontFamily);
+    }
+    if (styleConfig.accentScriptFontFamily) {
+      ensureGoogleFontLoaded(styleConfig.accentScriptFontFamily);
+    }
+  }, [
+    styleConfig.fontFamily,
+    styleConfig.heroWordFontFamily,
+    styleConfig.accentScriptFontFamily,
+  ]);
   const [audioEnhancer, setAudioEnhancer] = useState<AudioEnhancerConfig>({
     enabled: false,
     noiseReductionDb: 24,
@@ -459,31 +559,78 @@ export default function App() {
   // Extracts 16kHz anti-aliased mono PCM WAV audio (or direct video stream fallback)
   // and transcribes every spoken word verbatim with exact startTime and endTime.
   const runFastCaptionPipeline = useCallback(
-    async (file: File, hintOverride?: string) => {
+    async (
+      file: File,
+      hintOrOptions?:
+        | string
+        | {
+            hintOverride?: string;
+            autoEmojisOverride?: boolean;
+            removePunctuationOverride?: boolean;
+            autoHeroNLPOverride?: boolean;
+            audioEnhancementOverride?: boolean;
+            removeGapsOverride?: boolean;
+          }
+    ) => {
+      const opts =
+        typeof hintOrOptions === 'string'
+          ? { hintOverride: hintOrOptions }
+          : hintOrOptions || {};
+
+      const effectiveHint = opts.hintOverride ?? sourceLanguageHint;
+      // Emojis are OFF whenever styleConfig.removeEmojis !== false (default is OFF/true)
+      const effectiveAutoEmojis =
+        opts.autoEmojisOverride !== undefined
+          ? opts.autoEmojisOverride
+          : styleConfig.removeEmojis === false;
+      const effectiveRemovePunctuation =
+        opts.removePunctuationOverride !== undefined
+          ? opts.removePunctuationOverride
+          : Boolean(styleConfig.removePunctuation);
+      const effectiveAutoHeroNLP =
+        opts.autoHeroNLPOverride !== undefined
+          ? opts.autoHeroNLPOverride
+          : Boolean(autoHeroNLP && !styleConfig.removeEmphasis);
+      const effectiveAudioEnhancement =
+        opts.audioEnhancementOverride !== undefined
+          ? opts.audioEnhancementOverride
+          : Boolean(audioEnhancer.enabled);
+      const effectiveRemoveGaps =
+        opts.removeGapsOverride !== undefined
+          ? opts.removeGapsOverride
+          : Boolean(styleConfig.removeGaps);
+
       setIsTranscribing(true);
       setErrorBanner(null);
       // Immediately clear any sample reel captions so only real captions from the uploaded reel appear
       setSegments([]);
 
       try {
-        const chunks = await extractAudioChunksFromVideo(file, (stage) =>
-          setTranscribeStage(stage)
+        const chunks = await extractAudioChunksFromVideo(
+          file,
+          (stage) => setTranscribeStage(stage),
+          undefined,
+          effectiveAudioEnhancement
         );
         if (chunks.length > 0 && chunks[0].totalDuration) {
           setDuration(chunks[0].totalDuration);
         }
-        if (chunks.length > 0 && Array.isArray(chunks[0].waveformBars)) {
-          setAudioWaveformBars(chunks[0].waveformBars);
+        const extractedWaveform =
+          chunks.length > 0 && Array.isArray(chunks[0].waveformBars)
+            ? chunks[0].waveformBars
+            : [];
+        if (extractedWaveform.length > 0) {
+          setAudioWaveformBars(extractedWaveform);
         }
 
-        // Collect all Voice Activity Detection (VAD) speech windows across chunks
+        // Collect all Voice Activity Detection (VAD) speech windows across chunks at 0.001s precision
         const allSpeechWindows: SpeechWindow[] = [];
         chunks.forEach((c) => {
           if (Array.isArray(c.speechWindows)) {
             c.speechWindows.forEach((w) => {
               allSpeechWindows.push({
-                start: Number((c.chunkStartTime + w.start).toFixed(2)),
-                end: Number((c.chunkStartTime + w.end).toFixed(2)),
+                start: Number((c.chunkStartTime + w.start).toFixed(3)),
+                end: Number((c.chunkStartTime + w.end).toFixed(3)),
               });
             });
           }
@@ -538,8 +685,10 @@ export default function App() {
                     duration: chunk.chunkDuration,
                     chunkStartTime: chunk.chunkStartTime,
                     chunkIndex: index,
-                    sourceLanguageHint: hintOverride ?? sourceLanguageHint,
-                    autoHeroNLP,
+                    sourceLanguageHint: effectiveHint,
+                    autoHeroNLP: effectiveAutoHeroNLP,
+                    autoEmojis: effectiveAutoEmojis,
+                    removePunctuation: effectiveRemovePunctuation,
                     instantMode: true,
                     speechWindows: autoSyncDialogue ? chunk.speechWindows : [],
                   }),
@@ -565,7 +714,7 @@ export default function App() {
               }
 
               if (Array.isArray(parsed.data.segments) && parsed.data.segments.length > 0) {
-                chunkSegments = autoHeroNLP
+                chunkSegments = effectiveAutoHeroNLP
                   ? applyAutoHeroNLPToSegments(parsed.data.segments)
                   : parsed.data.segments;
                 break;
@@ -598,25 +747,27 @@ export default function App() {
                 )
               : merged;
 
-          // Enforce strict monotonic, non-overlapping segment & word timings so timeline blocks NEVER stack on top of each other
+          // Enforce strict monotonic, non-overlapping segment & word timings at 0.001s millisecond resolution
           const totalDur = chunks[0]?.totalDuration || duration || 30;
           const finalSegments: CaptionSegment[] = [];
           let cursorTime = 0;
 
           for (let i = 0; i < rawGrouped.length; i++) {
             const seg = rawGrouped[i];
-            const cleanStart = Number(Math.max(cursorTime, seg.startTime).toFixed(2));
-            const minSegDur = 0.35;
+            const cleanStart = Number(Math.max(cursorTime, seg.startTime).toFixed(3));
+            const minSegDur = 0.24;
             const rawEnd = Math.max(cleanStart + minSegDur, seg.endTime);
             const nextSegStart =
               i < rawGrouped.length - 1 ? rawGrouped[i + 1].startTime : totalDur;
             const cleanEnd = Number(
               Math.min(
                 totalDur,
-                nextSegStart > cleanStart + minSegDur
+                effectiveRemoveGaps && i < rawGrouped.length - 1
+                  ? Math.max(cleanStart + minSegDur, nextSegStart)
+                  : nextSegStart > cleanStart + minSegDur
                   ? Math.min(rawEnd, nextSegStart)
                   : rawEnd
-              ).toFixed(2)
+              ).toFixed(3)
             );
             cursorTime = cleanEnd;
 
@@ -624,16 +775,45 @@ export default function App() {
             (Object.keys(seg.tracks) as TrackKey[]).forEach((tk) => {
               const tr = seg.tracks[tk];
               if (!tr) return;
+              let sanitizedText = tr.text || '';
+              if (!effectiveAutoEmojis) {
+                sanitizedText = stripEmojisFromText(sanitizedText);
+              }
+              if (effectiveRemovePunctuation) {
+                sanitizedText = stripPunctuationFromText(sanitizedText);
+              }
+              const sanitizedExistingWords = Array.isArray(tr.words)
+                ? tr.words
+                    .map((w) => {
+                      let cleanW = w.word || '';
+                      if (!effectiveAutoEmojis) cleanW = stripEmojisFromText(cleanW);
+                      if (effectiveRemovePunctuation) {
+                        cleanW = stripPunctuationFromText(cleanW);
+                      }
+                      return {
+                        ...w,
+                        word: cleanW.trim(),
+                        isHero: effectiveAutoHeroNLP ? Boolean(w.isHero) : false,
+                      };
+                    })
+                    .filter((w) => w.word.length > 0)
+                : undefined;
+
+              const builtWords = buildWordTimingsClient(
+                sanitizedText,
+                cleanStart,
+                cleanEnd,
+                sanitizedExistingWords,
+                undefined,
+                effectiveAutoHeroNLP
+              ).map((w) => ({
+                ...w,
+                isHero: effectiveAutoHeroNLP ? Boolean(w.isHero) : false,
+              }));
+
               updatedTracks[tk] = {
-                text: tr.text,
-                words: buildWordTimingsClient(
-                  tr.text,
-                  cleanStart,
-                  cleanEnd,
-                  tr.words,
-                  undefined,
-                  autoHeroNLP
-                ),
+                text: builtWords.map((w) => w.word).join(' '),
+                words: builtWords,
               };
             });
 
@@ -647,11 +827,18 @@ export default function App() {
           }
 
           if (finalSegments.length > 0) {
-            setSegments(finalSegments);
+            const waveformAligned = alignSegmentsToAudioWaveformPrecise(
+              finalSegments,
+              extractedWaveform,
+              totalDur,
+              effectiveAutoHeroNLP
+            );
+            const sanitizedRomanSegments = sanitizeSegmentsRomanTracks(waveformAligned);
+            setSegments(sanitizedRomanSegments);
             // Auto-adjust timeline zoom so every caption box has plenty of horizontal room to show full words
             const recommendedZoom = Math.max(
               1.6,
-              Math.min(5, Number((finalSegments.length / 7).toFixed(1)))
+              Math.min(5, Number((sanitizedRomanSegments.length / 7).toFixed(1)))
             );
             setTimelineZoom(recommendedZoom);
           }
@@ -691,8 +878,21 @@ export default function App() {
           0
         );
         if (totalCreated > 0) {
+          const allMerged = Array.from(chunkMap.entries())
+            .sort((a, b) => a[0] - b[0])
+            .flatMap(([, arr]) => arr);
+          if (allMerged.length > 0) {
+            const initialSlots = createDefaultThreeBRollSlots(
+              allMerged,
+              styleConfig.primaryTrack,
+              styleConfig.aspectRatio || '9:16'
+            );
+            setAiBRollSlots(initialSlots);
+          }
           showToast(
-            `Generated 100% verbatim word-by-word captions across your entire video!`
+            `Generated 100% verbatim captions (${
+              effectiveAutoEmojis ? 'Emojis ON' : 'Emojis OFF'
+            })!`
           );
         } else {
           setErrorBanner(
@@ -712,9 +912,14 @@ export default function App() {
       sourceLanguageHint,
       autoHeroNLP,
       autoSyncDialogue,
+      audioEnhancer.enabled,
       duration,
       styleConfig.wordsPerLine,
       styleConfig.maxCharsPerLine,
+      styleConfig.removeEmojis,
+      styleConfig.removePunctuation,
+      styleConfig.removeEmphasis,
+      styleConfig.removeGaps,
       showToast,
       fetchWithAutoRetry,
       safeParseApiJson,
@@ -726,10 +931,16 @@ export default function App() {
       if (uploadedVideoUrl) {
         URL.revokeObjectURL(uploadedVideoUrl);
       }
+      clearCachedVideoFrame();
       const nextUrl = URL.createObjectURL(file);
       setUploadedVideoFile(file);
       setUploadedVideoUrl(nextUrl);
       setUploadedVideoName(file.name);
+      // Always reset video cropping & transform for every newly imported video!
+      setStyleConfig((prev) => ({
+        ...prev,
+        videoClipEdit: { ...DEFAULT_VIDEO_CLIP_EDIT },
+      }));
       // Clear sample segments immediately so old captions never appear on the uploaded reel
       setSegments([]);
       setCurrentTime(0);
@@ -780,10 +991,15 @@ export default function App() {
     if (uploadedVideoUrl) {
       URL.revokeObjectURL(uploadedVideoUrl);
     }
+    clearCachedVideoFrame();
     setUploadedVideoUrl(null);
     setUploadedVideoFile(null);
     setUploadedVideoName(null);
     setActiveSampleReel(reel);
+    setStyleConfig((prev) => ({
+      ...prev,
+      videoClipEdit: { ...DEFAULT_VIDEO_CLIP_EDIT },
+    }));
     setSegments(reel.segments);
     setDuration(reel.duration);
     setDetectedLanguage(reel.dialect);
@@ -810,6 +1026,12 @@ export default function App() {
         sourceStart: 0,
       },
     ]);
+    const defaultSlots = createDefaultThreeBRollSlots(
+      reel.segments,
+      styleConfig.primaryTrack,
+      styleConfig.aspectRatio || '9:16'
+    );
+    setAiBRollSlots(defaultSlots);
   };
 
   // Section 5.1 & 5.2 Per-Line Props Updater
@@ -1010,9 +1232,12 @@ export default function App() {
         if (seg.id !== segmentId) return seg;
         const trackData = seg.tracks[trackKey];
         if (!trackData) return seg;
-        const updatedWords = trackData.words.map((w, idx) =>
-          idx === wordIndex ? { ...w, isHero: !w.isHero } : w
-        );
+        const targetWasHero = Boolean(trackData.words[wordIndex]?.isHero);
+        // Enforce single emphasized word selection per caption line
+        const updatedWords = trackData.words.map((w, idx) => ({
+          ...w,
+          isHero: idx === wordIndex ? !targetWasHero : false,
+        }));
         return {
           ...seg,
           tracks: {
@@ -1452,6 +1677,344 @@ export default function App() {
     }
   };
 
+  // Sync the 3 AI B-Roll Image Slots onto the Multi-Track Timeline B-Roll 1 Track
+  const syncAiBRollSlotsToTimeline = useCallback((slots: AIBRollSlot[]) => {
+    const anySlotEnabled = slots.some((s) => s.enabled);
+    setTracksConfig((prev) => ({
+      ...prev,
+      broll: {
+        ...prev.broll,
+        enabled: anySlotEnabled,
+        visible: anySlotEnabled,
+      },
+    }));
+    const clips: TimelineClip[] = slots
+      .filter((s) => s.enabled)
+      .map((s) => ({
+        id: `timeline-${s.id}`,
+        trackId: 'broll',
+        label: `B-Roll #${s.slotNumber} (${s.aspectRatio}) · ${s.title}`,
+        startTime: s.startTime,
+        endTime: s.endTime,
+        sourceStart: 0,
+        brollPrompt: s.prompt,
+        brollEffect:
+          s.motionPreset === 'pan_glide'
+            ? 'pan-left'
+            : s.motionPreset === 'portal_pop'
+              ? 'zoom-in'
+              : 'ken-burns',
+      }));
+    setBrollClips(clips);
+  }, []);
+
+  const handleUpdateBRollSlot = useCallback(
+    (slotId: string, partial: Partial<AIBRollSlot>) => {
+      setAiBRollSlots((prev) => {
+        const next = prev.map((s) => {
+          if (s.id !== slotId) return s;
+          const updated = { ...s, ...partial };
+          // If linkedSegmentId changed, sync startTime and endTime to that caption segment
+          if (partial.linkedSegmentId) {
+            const matchedSeg = segments.find((seg) => seg.id === partial.linkedSegmentId);
+            if (matchedSeg) {
+              updated.startTime = matchedSeg.startTime;
+              updated.endTime = matchedSeg.endTime;
+              updated.scriptContext =
+                matchedSeg.tracks[styleConfig.primaryTrack]?.text ||
+                matchedSeg.tracks.tinglish?.text ||
+                matchedSeg.tracks.english?.text ||
+                updated.scriptContext;
+            }
+          }
+          return updated;
+        });
+        syncAiBRollSlotsToTimeline(next);
+        return next;
+      });
+    },
+    [segments, styleConfig.primaryTrack, syncAiBRollSlotsToTimeline]
+  );
+
+  const handleRegenerateSingleBRollSlotImage = useCallback(
+    async (
+      slotId: string,
+      promptOverride?: string,
+      ratioOverride?: VideoAspectRatio
+    ) => {
+      const targetSlot = aiBRollSlots.find((s) => s.id === slotId);
+      if (!targetSlot) return;
+
+      const targetPrompt = promptOverride || targetSlot.prompt;
+      const targetRatio: VideoAspectRatio =
+        ratioOverride || targetSlot.aspectRatio || styleConfig.aspectRatio || '9:16';
+
+      handleUpdateStyleAndSyncPreset({ brollEnabled: true });
+      setAiBRollSlots((prev) =>
+        prev.map((s) =>
+          s.id === slotId
+            ? {
+                ...s,
+                prompt: targetPrompt,
+                aspectRatio: targetRatio,
+                isGenerating: true,
+              }
+            : s
+        )
+      );
+
+      try {
+        const generatedUrl = await generateBRollImageWithGemini(
+          targetPrompt,
+          targetRatio,
+          targetSlot.slotNumber,
+          targetSlot.title
+        );
+        setAiBRollSlots((prev) => {
+          const next = prev.map((s) =>
+            s.id === slotId
+              ? {
+                  ...s,
+                  prompt: targetPrompt,
+                  aspectRatio: targetRatio,
+                  imageDataUrl: generatedUrl,
+                  isGenerating: false,
+                }
+              : s
+          );
+          syncAiBRollSlotsToTimeline(next);
+          return next;
+        });
+
+        // Also update any caption segment explicitly linked to this slot
+        setSegments((prev) =>
+          prev.map((seg) =>
+            seg.aiBrollSlotId === slotId || seg.id === targetSlot.linkedSegmentId
+              ? {
+                  ...seg,
+                  aiBrollEnabled: true,
+                  aiBrollSlotId: slotId,
+                  aiBrollAspectRatio: targetRatio,
+                  aiBrollCustomImageUrl: generatedUrl,
+                  brollImageUrl: generatedUrl,
+                }
+              : seg
+          )
+        );
+
+        playMagicalBRollSoundEffect('magical_chime', styleConfig.sfxVolume ?? 0.45);
+        showToast(
+          `Created AI B-Roll #${targetSlot.slotNumber} (${targetRatio}) with Gemini Image Create!`
+        );
+      } catch {
+        setAiBRollSlots((prev) =>
+          prev.map((s) => (s.id === slotId ? { ...s, isGenerating: false } : s))
+        );
+      }
+    },
+    [
+      aiBRollSlots,
+      styleConfig.aspectRatio,
+      styleConfig.sfxVolume,
+      syncAiBRollSlotsToTimeline,
+      showToast,
+    ]
+  );
+
+  const handleAnalyzeAndGenerateAllThreeBRolls = useCallback(
+    async (targetRatio?: VideoAspectRatio) => {
+      if (segments.length === 0) {
+        showToast('Please create or load captions first so Gemini can analyze the script.');
+        return;
+      }
+
+      const ratioToUse: VideoAspectRatio =
+        targetRatio || styleConfig.aspectRatio || '9:16';
+
+      setIsAnalyzingBRollScript(true);
+      handleUpdateStyleAndSyncPreset({ brollEnabled: true });
+      showToast(
+        `Analyzing caption script with Gemini AI & creating 3 B-Roll images (${ratioToUse})...`
+      );
+
+      try {
+        const plannedSlots = await analyzeScriptForThreeBRolls(
+          segments,
+          styleConfig.primaryTrack,
+          ratioToUse,
+          aiBRollSlots
+        );
+
+        const generatingSlots: AIBRollSlot[] = plannedSlots.map((s) => ({
+          ...s,
+          aspectRatio: ratioToUse,
+          isGenerating: true,
+        }));
+        setAiBRollSlots(generatingSlots);
+
+        // Generate all 3 B-Roll images in parallel with Gemini Image Create
+        const generatedSlots: AIBRollSlot[] = await Promise.all(
+          generatingSlots.map(async (slot) => {
+            const generatedUrl = await generateBRollImageWithGemini(
+              slot.prompt,
+              slot.aspectRatio,
+              slot.slotNumber,
+              slot.title
+            );
+            return {
+              ...slot,
+              imageDataUrl: generatedUrl,
+              isGenerating: false,
+            };
+          })
+        );
+
+        setAiBRollSlots(generatedSlots);
+        syncAiBRollSlotsToTimeline(generatedSlots);
+
+        // Link the 3 selected caption segments to their respective B-Roll slots
+        setSegments((prev) =>
+          prev.map((seg) => {
+            const matchedSlot = generatedSlots.find(
+              (s) => s.linkedSegmentId === seg.id
+            );
+            if (!matchedSlot) return seg;
+            return {
+              ...seg,
+              aiBrollEnabled: true,
+              aiBrollSlotId: matchedSlot.id,
+              aiBrollAspectRatio: matchedSlot.aspectRatio,
+              aiBrollPrompt: matchedSlot.prompt,
+              aiBrollCustomImageUrl: matchedSlot.imageDataUrl,
+              brollImageUrl: matchedSlot.imageDataUrl,
+              aiBrollDisplayLayout: matchedSlot.displayLayout,
+              aiBrollMagicalEffect: matchedSlot.magicalEffect,
+            };
+          })
+        );
+
+        playMagicalBRollSoundEffect('magical_chime', styleConfig.sfxVolume ?? 0.45);
+        showToast(
+          `Created all 3 AI B-Roll Images (${ratioToUse}) + Magical Effects from your caption script!`
+        );
+      } catch {
+        showToast('Created 3 AI B-Roll scenes with magical effects!');
+      } finally {
+        setIsAnalyzingBRollScript(false);
+      }
+    },
+    [
+      segments,
+      aiBRollSlots,
+      styleConfig.primaryTrack,
+      styleConfig.aspectRatio,
+      styleConfig.sfxVolume,
+      syncAiBRollSlotsToTimeline,
+      showToast,
+    ]
+  );
+
+  const handleGenerateSegmentCustomBRoll = useCallback(
+    async (
+      segmentId: string,
+      customPrompt: string,
+      aspectRatio: VideoAspectRatio
+    ) => {
+      const targetSeg = segments.find((s) => s.id === segmentId);
+      if (!targetSeg) return;
+
+      handleUpdateStyleAndSyncPreset({ brollEnabled: true });
+      showToast(`Creating custom ${aspectRatio} AI B-Roll image for this caption...`);
+
+      // Assign to an existing slot or Slot #1/#2/#3 based on segment position
+      const segIdx = segments.findIndex((s) => s.id === segmentId);
+      const slotIndex =
+        segIdx < segments.length / 3 ? 0 : segIdx < (segments.length * 2) / 3 ? 1 : 2;
+      const targetSlot = aiBRollSlots[slotIndex] || aiBRollSlots[0];
+
+      if (targetSlot) {
+        setAiBRollSlots((prev) =>
+          prev.map((s, i) =>
+            i === slotIndex
+              ? {
+                  ...s,
+                  linkedSegmentId: segmentId,
+                  startTime: targetSeg.startTime,
+                  endTime: targetSeg.endTime,
+                  prompt: customPrompt,
+                  aspectRatio,
+                  isGenerating: true,
+                }
+              : s
+          )
+        );
+      }
+
+      const generatedUrl = await generateBRollImageWithGemini(
+        customPrompt,
+        aspectRatio,
+        (slotIndex + 1) as 1 | 2 | 3,
+        `Caption #${segIdx + 1} B-Roll`
+      );
+
+      setSegments((prev) =>
+        prev.map((s) =>
+          s.id === segmentId
+            ? {
+                ...s,
+                aiBrollEnabled: true,
+                aiBrollSlotId: targetSlot?.id,
+                aiBrollPrompt: customPrompt,
+                aiBrollAspectRatio: aspectRatio,
+                aiBrollCustomImageUrl: generatedUrl,
+                brollImageUrl: generatedUrl,
+                aiBrollDisplayLayout:
+                  s.aiBrollDisplayLayout || styleConfig.aiBrollLayout || 'cutaway',
+                aiBrollMagicalEffect:
+                  s.aiBrollMagicalEffect ||
+                  styleConfig.aiBrollMagicalEffect ||
+                  'all_magic',
+              }
+            : s
+        )
+      );
+
+      if (targetSlot) {
+        setAiBRollSlots((prev) => {
+          const next = prev.map((s, i) =>
+            i === slotIndex
+              ? {
+                  ...s,
+                  linkedSegmentId: segmentId,
+                  startTime: targetSeg.startTime,
+                  endTime: targetSeg.endTime,
+                  prompt: customPrompt,
+                  aspectRatio,
+                  imageDataUrl: generatedUrl,
+                  isGenerating: false,
+                  enabled: true,
+                }
+              : s
+          );
+          syncAiBRollSlotsToTimeline(next);
+          return next;
+        });
+      }
+
+      playMagicalBRollSoundEffect('magical_chime', styleConfig.sfxVolume ?? 0.45);
+      showToast(`Created ${aspectRatio} AI B-Roll image & attached to caption!`);
+    },
+    [
+      segments,
+      aiBRollSlots,
+      styleConfig.aiBrollLayout,
+      styleConfig.aiBrollMagicalEffect,
+      styleConfig.sfxVolume,
+      syncAiBRollSlotsToTimeline,
+      showToast,
+    ]
+  );
+
   const handleAddSegment = () => {
     const lastEnd =
       segments.length > 0 ? segments[segments.length - 1].endTime : 0;
@@ -1524,6 +2087,7 @@ export default function App() {
     }
 
     if (action === 'remove-punctuation') {
+      setStyleConfig((prev) => ({ ...prev, removePunctuation: true }));
       setSegments((prev) =>
         prev.map((seg) => {
           const nextTracks: CaptionSegment['tracks'] = {};
@@ -1533,7 +2097,7 @@ export default function App() {
             const cleanedWords = t.words
               .map((w) => ({
                 ...w,
-                word: w.word.replace(/[.,!?;:'"“”‘’—–\-()[\]{}]/g, '').trim(),
+                word: stripPunctuationFromText(w.word),
               }))
               .filter((w) => w.word.length > 0);
             nextTracks[k] = {
@@ -1541,7 +2105,18 @@ export default function App() {
               words: cleanedWords,
             };
           });
-          return { ...seg, tracks: nextTracks };
+          return {
+            ...seg,
+            customLine1Text:
+              seg.customLine1Text !== undefined
+                ? stripPunctuationFromText(seg.customLine1Text)
+                : undefined,
+            customLine2Text:
+              seg.customLine2Text !== undefined
+                ? stripPunctuationFromText(seg.customLine2Text)
+                : undefined,
+            tracks: nextTracks,
+          };
         })
       );
       showToast('Removed punctuation across all captions!');
@@ -1549,11 +2124,14 @@ export default function App() {
     }
 
     if (action === 'restore-punctuation') {
+      setStyleConfig((prev) => ({ ...prev, removePunctuation: false }));
       showToast('Punctuation enabled for captions');
       return;
     }
 
     if (action === 'remove-emphasis') {
+      setStyleConfig((prev) => ({ ...prev, removeEmphasis: true }));
+      setAutoHeroNLP(false);
       setSegments((prev) =>
         prev.map((seg) => {
           const nextTracks: CaptionSegment['tracks'] = {};
@@ -1573,12 +2151,15 @@ export default function App() {
     }
 
     if (action === 'restore-emphasis') {
+      setStyleConfig((prev) => ({ ...prev, removeEmphasis: false }));
+      setAutoHeroNLP(true);
       setSegments((prev) => applyAutoHeroNLPToSegments(prev));
       showToast('Restored green word emphasis across captions!');
       return;
     }
 
     if (action === 'remove-gaps') {
+      setStyleConfig((prev) => ({ ...prev, removeGaps: true }));
       setSegments((prev) =>
         prev.map((seg, idx) => {
           const nextSeg = prev[idx + 1];
@@ -1605,6 +2186,7 @@ export default function App() {
     }
 
     if (action === 'restore-gaps') {
+      setStyleConfig((prev) => ({ ...prev, removeGaps: false }));
       setSegments((prev) =>
         prev.map((seg, idx) => {
           const nextSeg = prev[idx + 1];
@@ -1623,7 +2205,7 @@ export default function App() {
     }
 
     if (action === 'remove-emojis') {
-      const emojiRegex = /[\p{Extended_Pictographic}\uFE0F]/gu;
+      setStyleConfig((prev) => ({ ...prev, removeEmojis: true }));
       setSegments((prev) =>
         prev.map((seg) => {
           const nextTracks: CaptionSegment['tracks'] = {};
@@ -1633,7 +2215,7 @@ export default function App() {
             const cleanedWords = t.words
               .map((w) => ({
                 ...w,
-                word: w.word.replace(emojiRegex, '').trim(),
+                word: stripEmojisFromText(w.word),
               }))
               .filter((w) => w.word.length > 0);
             nextTracks[k] = {
@@ -1641,14 +2223,26 @@ export default function App() {
               words: cleanedWords,
             };
           });
-          return { ...seg, tracks: nextTracks };
+          return {
+            ...seg,
+            customLine1Text:
+              seg.customLine1Text !== undefined
+                ? stripEmojisFromText(seg.customLine1Text)
+                : undefined,
+            customLine2Text:
+              seg.customLine2Text !== undefined
+                ? stripEmojisFromText(seg.customLine2Text)
+                : undefined,
+            tracks: nextTracks,
+          };
         })
       );
-      showToast('Removed all emojis from captions!');
+      showToast('Emojis turned OFF and removed across all captions!');
       return;
     }
 
     if (action === 'auto-add-emojis') {
+      setStyleConfig((prev) => ({ ...prev, removeEmojis: false }));
       setSegments((prev) =>
         prev.map((seg) => {
           const nextTracks: CaptionSegment['tracks'] = {};
@@ -1669,7 +2263,7 @@ export default function App() {
           return { ...seg, tracks: nextTracks };
         })
       );
-      showToast('Auto-inserted contextual emojis into captions!');
+      showToast('Emojis turned ON and added to captions!');
     }
   };
 
@@ -1826,38 +2420,188 @@ export default function App() {
     }
   };
 
-  // Updates styleConfig AND automatically syncs font/size/color edits into the active SIDZ_<NAME> preset!
+  // Updates styleConfig AND automatically syncs font/size/color/position/transition edits across active presets and segments!
   const handleUpdateStyleAndSyncPreset = (partial: Partial<CaptionStyleConfig>) => {
+    if (partial.primaryTrack && isRomanTrack(partial.primaryTrack)) {
+      setSegments((prevSegs) => sanitizeSegmentsRomanTracks(prevSegs));
+    }
+    if (partial.fontFamily) ensureGoogleFontLoaded(partial.fontFamily);
+    if (partial.heroWordFontFamily) ensureGoogleFontLoaded(partial.heroWordFontFamily);
+    if (partial.accentScriptFontFamily)
+      ensureGoogleFontLoaded(partial.accentScriptFontFamily);
+
+    const enrichedPartial: Partial<CaptionStyleConfig> = { ...partial };
+    if (partial.fontFamily && !partial.heroWordFontFamily) {
+      enrichedPartial.heroWordFontFamily = partial.fontFamily;
+    }
+    if (partial.highlightColor && !partial.gradientMid) {
+      enrichedPartial.gradientMid = partial.highlightColor;
+    }
+
+    // Clear conflicting per-segment overrides when the user adjusts global font, size, color, or placement
+    const hasFontChange = Boolean(
+      enrichedPartial.fontFamily || enrichedPartial.heroWordFontFamily
+    );
+    const hasSizeChange = Boolean(
+      enrichedPartial.fontSize !== undefined ||
+        enrichedPartial.smallWordScale !== undefined ||
+        enrichedPartial.bigWordScale !== undefined ||
+        enrichedPartial.line1FontSizePx !== undefined ||
+        enrichedPartial.line2FontSizePx !== undefined
+    );
+    const hasColorChange = Boolean(
+      enrichedPartial.primaryColor || enrichedPartial.highlightColor
+    );
+    const hasPosChange = Boolean(
+      enrichedPartial.positionX !== undefined ||
+        enrichedPartial.positionY !== undefined
+    );
+
+    if (hasFontChange || hasSizeChange || hasColorChange || hasPosChange) {
+      setSegments((prevSegs) =>
+        prevSegs.map((seg) => {
+          const nextSeg = { ...seg };
+          if (hasSizeChange) {
+            delete nextSeg.line1FontSizePx;
+            delete nextSeg.line2FontSizePx;
+          }
+          if (nextSeg.lineStyleOverride) {
+            const nextOverride = { ...nextSeg.lineStyleOverride };
+            if (hasFontChange) delete nextOverride.fontFamily;
+            if (hasSizeChange) {
+              delete nextOverride.fontSize;
+              delete nextOverride.line1FontSizePx;
+              delete nextOverride.line2FontSizePx;
+            }
+            if (hasColorChange) {
+              delete nextOverride.primaryColor;
+              delete nextOverride.secondaryColor;
+            }
+            if (hasPosChange) {
+              delete nextOverride.positionX;
+              delete nextOverride.positionY;
+            }
+            nextSeg.lineStyleOverride =
+              Object.keys(nextOverride).length > 0 ? nextOverride : undefined;
+          }
+          return nextSeg;
+        })
+      );
+    }
+
+    if (typeof enrichedPartial.brollEnabled === 'boolean') {
+      const nextBrollEnabled = enrichedPartial.brollEnabled;
+      setTracksConfig((prev) => ({
+        ...prev,
+        broll: {
+          ...prev.broll,
+          enabled: nextBrollEnabled,
+          visible: nextBrollEnabled,
+        },
+      }));
+      setAiBRollSlots((prev) =>
+        prev.map((s) => ({
+          ...s,
+          enabled: nextBrollEnabled,
+        }))
+      );
+    }
+    if (partial.videoClipEdit) {
+      clearCachedVideoFrame();
+    }
     setStyleConfig((prev) => {
-      const nextConfig = { ...prev, ...partial };
-      setPresets((currPresets) => {
-        const updated = currPresets.map((p) =>
-          p.id === nextConfig.presetId
-            ? {
-                ...p,
-                config: {
-                  ...p.config,
-                  ...partial,
-                },
-              }
-            : p
-        );
-        try {
-          localStorage.setItem(PRESETS_STORAGE_KEY, JSON.stringify(updated));
-        } catch {
-          // ignore
-        }
-        return updated;
-      });
+      const nextConfig = { ...prev, ...enrichedPartial };
+      // Never persist per-video crop/transform settings into caption style presets
+      const { videoClipEdit: _omitVideoClipEdit, ...presetSafePartial } =
+        enrichedPartial;
+      if (Object.keys(presetSafePartial).length > 0) {
+        setPresets((currPresets) => {
+          const updated = currPresets.map((p) =>
+            p.id === nextConfig.presetId
+              ? {
+                  ...p,
+                  config: {
+                    ...p.config,
+                    ...presetSafePartial,
+                    videoClipEdit: { ...DEFAULT_VIDEO_CLIP_EDIT },
+                  },
+                }
+              : p
+          );
+          try {
+            localStorage.setItem(PRESETS_STORAGE_KEY, JSON.stringify(updated));
+          } catch {
+            // ignore
+          }
+          return updated;
+        });
+      }
       return nextConfig;
     });
   };
 
   const handleApplyPreset = (preset: StylePreset) => {
+    const isLala =
+      preset.id === 'kalakar-lala' || preset.config.hierarchyMode === 'lala-handwritten';
+    if (preset.config.fontFamily) ensureGoogleFontLoaded(preset.config.fontFamily);
+    if (preset.config.heroWordFontFamily)
+      ensureGoogleFontLoaded(preset.config.heroWordFontFamily);
+    if (preset.config.accentScriptFontFamily)
+      ensureGoogleFontLoaded(preset.config.accentScriptFontFamily);
+
+    // Clear per-segment template/font/size/color overrides so the newly selected preset applies cleanly across all captions
+    setSegments((prev) =>
+      prev.map((seg) => ({
+        ...seg,
+        line1FontSizePx: undefined,
+        line2FontSizePx: undefined,
+        lineStyleOverride: undefined,
+      }))
+    );
+
     setStyleConfig((prev) => ({
       ...prev,
+      // Reset previous template-specific visual properties before applying the single selected preset
+      hierarchyMode: preset.config.hierarchyMode || 'standard',
+      backgroundColor: preset.config.backgroundColor ?? '#000000',
+      backgroundOpacity: preset.config.backgroundOpacity ?? 0,
+      backgroundEnabled:
+        preset.config.backgroundEnabled ??
+        (preset.config.backgroundOpacity !== undefined &&
+          preset.config.backgroundOpacity > 0.05),
+      underlineText: Boolean(preset.config.underlineText),
+      emphasisUnderline: Boolean(preset.config.emphasisUnderline),
+      arcEnabled: Boolean(preset.config.arcEnabled),
+      arcCurveDeg: preset.config.arcCurveDeg ?? 0,
+      heroBoxTilted: Boolean(preset.config.heroBoxTilted),
+      line1FontSizePx: undefined,
+      line2FontSizePx: undefined,
       ...preset.config,
+      // Never let a caption style preset overwrite or re-apply an old video crop
+      videoClipEdit: prev.videoClipEdit || { ...DEFAULT_VIDEO_CLIP_EDIT },
+      // Keep user's current horizontal & vertical screen placement when switching presets
+      positionX: prev.positionX ?? preset.config.positionX ?? 50,
+      positionY: prev.positionY ?? preset.config.positionY ?? 66,
       presetId: preset.id,
+      kalakarTemplateId: preset.id,
+      ...(isLala
+        ? {
+            hierarchyMode: 'lala-handwritten',
+            fontFamily: preset.config.fontFamily || 'Caveat',
+            heroWordFontFamily: preset.config.heroWordFontFamily || 'Caveat',
+            accentScriptFontFamily: preset.config.accentScriptFontFamily || 'Caveat',
+            primaryColor: preset.config.primaryColor || '#1C434C',
+            highlightColor: preset.config.highlightColor || '#EB4823',
+            backgroundColor: preset.config.backgroundColor || '#FAF6E8',
+            backgroundEnabled: true,
+            backgroundOpacity:
+              preset.config.backgroundOpacity && preset.config.backgroundOpacity > 0.1
+                ? preset.config.backgroundOpacity
+                : 0.96,
+            underlineText: true,
+            emphasisUnderline: true,
+          }
+        : {}),
     }));
   };
 
@@ -1953,14 +2697,22 @@ export default function App() {
 
   const handleSyncToVoiceNow = () => {
     if (segments.length === 0) return;
-    setSegments((prev) =>
-      syncSegmentsToVoiceActivity(prev, detectedSpeechWindows, duration)
-    );
+    setSegments((prev) => {
+      const vadSynced = syncSegmentsToVoiceActivity(
+        prev,
+        detectedSpeechWindows,
+        duration
+      );
+      return alignSegmentsToAudioWaveformPrecise(
+        vadSynced,
+        audioWaveformBars,
+        duration,
+        autoHeroNLP
+      );
+    });
     setAutoSyncDialogue(true);
     showToast(
-      detectedSpeechWindows.length > 0
-        ? `Synced ${segments.length} captions to ${detectedSpeechWindows.length} detected voice dialogue bursts!`
-        : `Aligned ${segments.length} captions evenly across ${duration.toFixed(1)}s timeline!`
+      `Micro-synced ${segments.length} captions & words to exact audio waveform peaks (0.001s precision)!`
     );
   };
 
@@ -1968,10 +2720,20 @@ export default function App() {
     const next = !autoSyncDialogue;
     setAutoSyncDialogue(next);
     if (next) {
-      setSegments((prev) =>
-        syncSegmentsToVoiceActivity(prev, detectedSpeechWindows, duration)
-      );
-      showToast('Voice Dialogue Sync (VAD) enabled: captions snapped to speech!');
+      setSegments((prev) => {
+        const vadSynced = syncSegmentsToVoiceActivity(
+          prev,
+          detectedSpeechWindows,
+          duration
+        );
+        return alignSegmentsToAudioWaveformPrecise(
+          vadSynced,
+          audioWaveformBars,
+          duration,
+          autoHeroNLP
+        );
+      });
+      showToast('Voice Dialogue Sync (VAD) enabled: captions snapped to speech at 0.001s precision!');
     } else {
       showToast('Unsynced / Free Timing mode enabled: move or time captions freely!');
     }
@@ -2166,26 +2928,29 @@ export default function App() {
 
     if (drag.targetLayer === 'small1') {
       handleUpdateStyleAndSyncPreset({
-        smallOffsetX: Math.round(Math.max(-45, Math.min(45, drag.startPosX + pctDeltaX))),
-        smallOffsetY: Math.round(Math.max(-35, Math.min(35, drag.startPosY + pctDeltaY))),
+        smallOffsetX: Math.round(Math.max(-48, Math.min(48, drag.startPosX + pctDeltaX))),
+        smallOffsetY: Math.round(Math.max(-45, Math.min(45, drag.startPosY + pctDeltaY))),
       });
     } else if (drag.targetLayer === 'small2') {
       handleUpdateStyleAndSyncPreset({
         smallLine2OffsetX: Math.round(
-          Math.max(-45, Math.min(45, drag.startPosX + pctDeltaX))
+          Math.max(-48, Math.min(48, drag.startPosX + pctDeltaX))
         ),
         smallLine2OffsetY: Math.round(
-          Math.max(-35, Math.min(35, drag.startPosY + pctDeltaY))
+          Math.max(-45, Math.min(45, drag.startPosY + pctDeltaY))
         ),
       });
     } else if (drag.targetLayer === 'big') {
       handleUpdateStyleAndSyncPreset({
-        bigOffsetX: Math.round(Math.max(-45, Math.min(45, drag.startPosX + pctDeltaX))),
-        bigOffsetY: Math.round(Math.max(-35, Math.min(35, drag.startPosY + pctDeltaY))),
+        bigOffsetX: Math.round(Math.max(-48, Math.min(48, drag.startPosX + pctDeltaX))),
+        bigOffsetY: Math.round(Math.max(-45, Math.min(45, drag.startPosY + pctDeltaY))),
       });
     } else {
-      const nextX = Math.round(Math.max(8, Math.min(92, drag.startPosX + pctDeltaX)));
-      const nextY = Math.round(Math.max(10, Math.min(90, drag.startPosY + pctDeltaY)));
+      let nextX = Math.round(Math.max(2, Math.min(98, drag.startPosX + pctDeltaX)));
+      let nextY = Math.round(Math.max(4, Math.min(96, drag.startPosY + pctDeltaY)));
+      // Magnetic center snap when within 1.5% of horizontal or vertical center (50%)
+      if (Math.abs(nextX - 50) <= 1.5) nextX = 50;
+      if (Math.abs(nextY - 50) <= 1.5) nextY = 50;
       handleUpdateStyleAndSyncPreset({
         positionX: nextX,
         positionY: nextY,
@@ -2265,7 +3030,9 @@ export default function App() {
       }
 
       const activeBrollAtPlayhead =
-        tracksConfig.broll.enabled && tracksConfig.broll.visible
+        Boolean(styleConfig.brollEnabled) &&
+        tracksConfig.broll.enabled &&
+        tracksConfig.broll.visible
           ? brollClips.find(
               (c) => !c.hidden && activeTime >= c.startTime && activeTime <= c.endTime
             ) || null
@@ -2293,11 +3060,13 @@ export default function App() {
             segments,
             style: styleConfig,
             isExportRender: false,
+            isDraggingCaption,
             isVideo1Visible: isVideo1ActiveAtPlayhead,
             isCaptionsVisible:
               tracksConfig.captions.enabled && tracksConfig.captions.visible,
             activeTimelineBroll: activeBrollAtPlayhead,
             activeTimelineVideo2: activeVideo2AtPlayhead,
+            aiBRollSlots: Boolean(styleConfig.brollEnabled) ? aiBRollSlots : [],
           });
         }
       }
@@ -2313,6 +3082,7 @@ export default function App() {
     isPlaying,
     isMuted,
     isExportingVideo,
+    isDraggingCaption,
     uploadedVideoUrl,
     activeSampleReel,
     segments,
@@ -2322,6 +3092,7 @@ export default function App() {
     audioClips,
     brollClips,
     video2Clips,
+    aiBRollSlots,
   ]);
 
   const handleExportSRT = () => {
@@ -2408,19 +3179,97 @@ export default function App() {
     }
   };
 
+  const handleExportPremiereNativeXML = () => {
+    const xmlContent = generatePremiereProXMEML(
+      segments,
+      styleConfig.primaryTrack,
+      duration,
+      {
+        resolution: exportResolution,
+        aspectRatio: styleConfig.aspectRatio || '9:16',
+        fps: exportFps,
+        fontFamily: styleConfig.fontFamily,
+        fontSize: styleConfig.fontSize,
+        primaryColor: styleConfig.primaryColor,
+        secondaryTrack: styleConfig.secondaryTrack,
+        includeSecondary: styleConfig.displayMode === 'dual-stacked',
+      }
+    );
+    triggerFileDownload(
+      xmlContent,
+      `kalakar-premiere-pro-${styleConfig.primaryTrack}-${exportResolution}.xml`,
+      'application/xml;charset=utf-8'
+    );
+    showToast(
+      `Downloaded Adobe Premiere Pro Sequence (.XML · ${exportResolution.toUpperCase()}) for ${styleConfig.primaryTrack}!`
+    );
+  };
+
   const handleExportPremiereXML = () => {
     const xmlContent = generatePremiereDaVinciXML(
       segments,
       styleConfig.primaryTrack,
-      duration
+      duration,
+      {
+        resolution: exportResolution,
+        aspectRatio: styleConfig.aspectRatio || '9:16',
+        fps: exportFps,
+        fontFamily: styleConfig.fontFamily,
+        fontSize: styleConfig.fontSize,
+        primaryColor: styleConfig.primaryColor,
+        secondaryTrack: styleConfig.secondaryTrack,
+        includeSecondary: styleConfig.displayMode === 'dual-stacked',
+      }
     );
     triggerFileDownload(
       xmlContent,
-      `kalakar-${styleConfig.primaryTrack}-timeline.fcpxml`,
+      `kalakar-premiere-${styleConfig.primaryTrack}-${exportResolution}-timeline.fcpxml`,
       'application/xml;charset=utf-8'
     );
     showToast(
-      `Downloaded Premiere Pro / DaVinci Resolve Timeline (.FCPXML) for ${styleConfig.primaryTrack}!`
+      `Downloaded Premiere Pro / Final Cut Timeline (.FCPXML · ${exportResolution.toUpperCase()})!`
+    );
+  };
+
+  const handleExportDaVinciFCPXML = () => {
+    const xmlContent = generatePremiereDaVinciXML(
+      segments,
+      styleConfig.primaryTrack,
+      duration,
+      {
+        resolution: exportResolution,
+        aspectRatio: styleConfig.aspectRatio || '9:16',
+        fps: exportFps,
+        fontFamily: styleConfig.fontFamily,
+        fontSize: styleConfig.fontSize,
+        primaryColor: styleConfig.primaryColor,
+        secondaryTrack: styleConfig.secondaryTrack,
+        includeSecondary: styleConfig.displayMode === 'dual-stacked',
+      }
+    );
+    triggerFileDownload(
+      xmlContent,
+      `kalakar-davinci-resolve-${styleConfig.primaryTrack}-${exportResolution}.fcpxml`,
+      'application/xml;charset=utf-8'
+    );
+    showToast(
+      `Downloaded DaVinci Resolve Studio Timeline (.FCPXML · ${exportResolution.toUpperCase()})!`
+    );
+  };
+
+  const handleExportDaVinciEDL = () => {
+    const edlContent = generateDaVinciResolveEDL(
+      segments,
+      styleConfig.primaryTrack,
+      exportFps
+    );
+    triggerFileDownload(
+      edlContent,
+      `kalakar-davinci-resolve-${styleConfig.primaryTrack}-markers.edl`,
+      'text/plain;charset=utf-8'
+    );
+    showToast(
+      `Downloaded DaVinci Resolve CMX 3600 Timeline & Subtitle Markers (.EDL)!`
     );
   };
 
@@ -2453,13 +3302,82 @@ export default function App() {
     }
   };
 
-  const handleExportAlphaOverlay = async () => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
+  useEffect(() => {
+    const win = window as unknown as {
+      __merupifyDeleteFont?: (name: string) => void;
+    };
+    win.__merupifyDeleteFont = (fontName: string) => {
+      setCustomFonts((prev) => prev.filter((f) => f !== fontName));
+      showToast(`Removed custom font "${fontName}"`);
+    };
+    return () => {
+      delete win.__merupifyDeleteFont;
+    };
+  }, [showToast]);
+
+  // Goldox Section 4.3: Replace Video with Exact Duration Verification (Preserves Captions & Timings!)
+  const handleReplaceVideoPreserveCaptions = useCallback(
+    (file: File) => {
+      const tempUrl = URL.createObjectURL(file);
+      const probeVid = document.createElement('video');
+      probeVid.preload = 'metadata';
+      probeVid.src = tempUrl;
+
+      probeVid.onloadedmetadata = () => {
+        const newDur = Number((probeVid.duration || duration).toFixed(2));
+        const diff = Math.abs(newDur - duration);
+
+        if (uploadedVideoUrl) {
+          URL.revokeObjectURL(uploadedVideoUrl);
+        }
+        clearCachedVideoFrame();
+        setUploadedVideoFile(file);
+        setUploadedVideoUrl(tempUrl);
+        setUploadedVideoName(file.name);
+        setStyleConfig((prev) => ({
+          ...prev,
+          videoClipEdit: { ...DEFAULT_VIDEO_CLIP_EDIT },
+        }));
+        setCurrentTime(0);
+        setIsPlaying(true);
+
+        if (diff <= 0.75 || !uploadedVideoFile) {
+          showToast(
+            `Replaced video with "${file.name}" (${newDur}s) — 100% of your captions, styles & timings preserved!`
+          );
+        } else {
+          showToast(
+            `Swapped video (${newDur}s vs ${duration.toFixed(1)}s) while preserving your existing captions! (Note: Goldox recommends matching video length)`
+          );
+        }
+      };
+
+      probeVid.onerror = () => {
+        handleUploadFile(file, false);
+      };
+    },
+    [duration, uploadedVideoUrl, uploadedVideoFile, handleUploadFile, showToast]
+  );
+
+  const handleExportAlphaOverlay = async (
+    resolutionOverride?: ExportResolution
+  ) => {
+    const previewCanvas = canvasRef.current;
     if (isExportingVideo) {
       stopExportEarlyRef.current = true;
       return;
     }
+
+    const chosenRes: ExportResolution =
+      resolutionOverride || exportResolution || '1080p';
+    if (resolutionOverride) {
+      setExportResolution(resolutionOverride);
+    }
+
+    const resMeta = getExportResolutionDimensions(
+      chosenRes,
+      styleConfig.aspectRatio || '9:16'
+    );
 
     setIsExportingVideo(true);
     setExportProgress(0);
@@ -2467,15 +3385,21 @@ export default function App() {
     stopExportEarlyRef.current = false;
 
     try {
+      const exportCanvas = document.createElement('canvas');
+      exportCanvas.width = resMeta.width;
+      exportCanvas.height = resMeta.height;
+      const exportCtx = exportCanvas.getContext('2d');
+      const previewCtx = previewCanvas?.getContext('2d') || null;
+
       const mimeCandidate = MediaRecorder.isTypeSupported(
         'video/webm;codecs=vp9'
       )
         ? 'video/webm;codecs=vp9'
         : 'video/webm';
-      const canvasStream = canvas.captureStream(60);
+      const canvasStream = exportCanvas.captureStream(exportFps || 60);
       const recorder = new MediaRecorder(canvasStream, {
         mimeType: mimeCandidate,
-        videoBitsPerSecond: 16_000_000,
+        videoBitsPerSecond: resMeta.videoBitsPerSecond,
       });
 
       const chunks: BlobPart[] = [];
@@ -2489,17 +3413,16 @@ export default function App() {
       });
 
       const totalDuration = Math.max(1, duration);
-      const ctx = canvas.getContext('2d');
       const cleanExportStyle: CaptionStyleConfig = {
         ...styleConfig,
         showOnScreenTransformBoxes: false,
       };
 
-      if (ctx) {
+      if (exportCtx) {
         renderReelCanvasFrame({
-          ctx,
-          canvasWidth: canvas.width,
-          canvasHeight: canvas.height,
+          ctx: exportCtx,
+          canvasWidth: exportCanvas.width,
+          canvasHeight: exportCanvas.height,
           videoElement: null,
           hasUploadedVideo: false,
           sampleReel: activeSampleReel,
@@ -2523,11 +3446,11 @@ export default function App() {
           Math.min(99, Math.round((wallElapsed / totalDuration) * 100))
         );
 
-        if (ctx) {
+        if (exportCtx) {
           renderReelCanvasFrame({
-            ctx,
-            canvasWidth: canvas.width,
-            canvasHeight: canvas.height,
+            ctx: exportCtx,
+            canvasWidth: exportCanvas.width,
+            canvasHeight: exportCanvas.height,
             videoElement: null,
             hasUploadedVideo: false,
             sampleReel: activeSampleReel,
@@ -2538,16 +3461,30 @@ export default function App() {
             transparentAlphaOnly: true,
           });
         }
+        if (previewCtx && previewCanvas) {
+          renderReelCanvasFrame({
+            ctx: previewCtx,
+            canvasWidth: previewCanvas.width,
+            canvasHeight: previewCanvas.height,
+            videoElement: videoRef.current,
+            hasUploadedVideo: Boolean(uploadedVideoUrl),
+            sampleReel: activeSampleReel,
+            currentTime: wallElapsed,
+            segments,
+            style: cleanExportStyle,
+            isExportRender: false,
+          });
+        }
         await new Promise((r) => setTimeout(r, 16));
       }
 
       recorder.stop();
       const alphaBlob = await exportCompletion;
       setExportProgress(100);
-      const filename = `kalakar-alpha-captions-${styleConfig.primaryTrack}.webm`;
+      const filename = `kalakar-alpha-captions-${styleConfig.primaryTrack}-${chosenRes}.webm`;
       triggerFileDownload(alphaBlob, filename, 'video/webm');
       showToast(
-        `Exported Transparent Alpha Caption Layer (${filename}) for Premiere Pro / DaVinci!`
+        `Exported ${chosenRes.toUpperCase()} Transparent Alpha Caption Layer (${filename}) for Premiere Pro / DaVinci!`
       );
     } catch (err: unknown) {
       setErrorBanner(
@@ -2565,19 +3502,32 @@ export default function App() {
     stopExportEarlyRef.current = true;
   };
 
-  const handleExportBurnedVideo = async (formatOverride?: VideoExportFormat) => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
+  const handleExportBurnedVideo = async (
+    formatOverride?: VideoExportFormat,
+    resolutionOverride?: ExportResolution,
+    fpsOverride?: ExportFrameRate
+  ) => {
+    const previewCanvas = canvasRef.current;
 
     if (isExportingVideo) {
       stopExportEarlyRef.current = true;
       return;
     }
 
-    const chosenFormat: VideoExportFormat = formatOverride || exportFormat || 'mp4';
-    if (formatOverride) {
-      setExportFormat(formatOverride);
-    }
+    const chosenFormat: VideoExportFormat =
+      formatOverride || exportFormat || 'mp4';
+    const chosenRes: ExportResolution =
+      resolutionOverride || exportResolution || '1080p';
+    const chosenFps: ExportFrameRate = fpsOverride || exportFps || 60;
+
+    if (formatOverride) setExportFormat(formatOverride);
+    if (resolutionOverride) setExportResolution(resolutionOverride);
+    if (fpsOverride) setExportFps(fpsOverride);
+
+    const resMeta = getExportResolutionDimensions(
+      chosenRes,
+      styleConfig.aspectRatio || '9:16'
+    );
 
     setIsExportingVideo(true);
     setExportProgress(0);
@@ -2586,17 +3536,25 @@ export default function App() {
 
     const AudioCtx =
       window.AudioContext ||
-      (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      (window as unknown as { webkitAudioContext: typeof AudioContext })
+        .webkitAudioContext;
     let audioCtx: AudioContext | null = null;
     let activeBufferSource: AudioBufferSourceNode | null = null;
     let prevVideoLoop = true;
     let prevVideoMuted = isMuted;
 
     try {
-      const formatInfo = getSupportedExportMimeType(chosenFormat);
-      const canvasStream = canvas.captureStream(60);
+      // Dedicated physical resolution canvas for 720p (720×1280), 1080p (1080×1920), or 4K (2160×3840)
+      const exportCanvas = document.createElement('canvas');
+      exportCanvas.width = resMeta.width;
+      exportCanvas.height = resMeta.height;
+      const exportCtx = exportCanvas.getContext('2d');
+      const previewCtx = previewCanvas?.getContext('2d') || null;
 
-      // Build Audio Track so exported .MP4 and .WP2/.WEBM ALWAYS include full crystal-clear audio!
+      const formatInfo = getSupportedExportMimeType(chosenFormat);
+      const canvasStream = exportCanvas.captureStream(chosenFps);
+
+      // Build Audio Track so exported .MP4, .MOV, and .WEBM ALWAYS include full crystal-clear audio!
       audioCtx = new AudioCtx();
       await audioCtx.resume();
       const audioDest = audioCtx.createMediaStreamDestination();
@@ -2628,7 +3586,8 @@ export default function App() {
             prevVideoMuted = vidEl.muted;
             vidEl.muted = false;
             vidEl.volume = 1.0;
-            const vidStream = vidEl.captureStream?.() || vidEl.mozCaptureStream?.();
+            const vidStream =
+              vidEl.captureStream?.() || vidEl.mozCaptureStream?.();
             if (vidStream && vidStream.getAudioTracks().length > 0) {
               vidStream.getAudioTracks().forEach((track) => {
                 canvasStream.addTrack(track);
@@ -2640,7 +3599,6 @@ export default function App() {
       }
 
       // If exporting a built-in Demo Reel (or if video had no audio track), synthesize a warm studio audio track
-      // so the exported .mp4 / .wp2 container always has a valid, playable audio stream!
       if (!hasConnectedAudioTrack && audioCtx) {
         const sampleRate = audioCtx.sampleRate || 44100;
         const totalDur = Math.max(1, duration);
@@ -2671,7 +3629,7 @@ export default function App() {
 
       const recorderOptions: MediaRecorderOptions = {
         mimeType: formatInfo.recorderMimeType,
-        videoBitsPerSecond: 16_000_000, // 16 Mbps 1080p Full HD Studio Quality
+        videoBitsPerSecond: resMeta.videoBitsPerSecond,
         audioBitsPerSecond: 192_000,
       };
 
@@ -2696,19 +3654,34 @@ export default function App() {
       });
 
       const totalDuration = Math.max(1, duration);
-      const ctx = canvas.getContext('2d');
       // Guarantee 100% clean text during export — never render dotted or yellow bounding boxes!
       const cleanExportStyle: CaptionStyleConfig = {
         ...styleConfig,
         showOnScreenTransformBoxes: false,
       };
 
-      // Render initial 0.0s frame before starting recorder
-      if (ctx) {
+      if (uploadedVideoUrl && videoRef.current) {
+        prevVideoLoop = videoRef.current.loop;
+        videoRef.current.loop = false;
+        if (activeBufferSource) {
+          prevVideoMuted = videoRef.current.muted;
+          videoRef.current.muted = true;
+        }
+        videoRef.current.currentTime = 0;
+        await videoRef.current.play().catch(() => {});
+        let waitSpin = 0;
+        while (videoRef.current.readyState < 2 && waitSpin < 12) {
+          await new Promise((r) => setTimeout(r, 15));
+          waitSpin++;
+        }
+      }
+
+      // Render initial 0.0s frame right before starting recorder at exact 720p / 1080p / 4K dimensions
+      if (exportCtx) {
         renderReelCanvasFrame({
-          ctx,
-          canvasWidth: canvas.width,
-          canvasHeight: canvas.height,
+          ctx: exportCtx,
+          canvasWidth: exportCanvas.width,
+          canvasHeight: exportCanvas.height,
           videoElement: videoRef.current,
           hasUploadedVideo: Boolean(uploadedVideoUrl),
           sampleReel: activeSampleReel,
@@ -2716,19 +3689,9 @@ export default function App() {
           segments,
           style: cleanExportStyle,
           isExportRender: true,
+          isDraggingCaption: false,
+          aiBRollSlots: Boolean(styleConfig.brollEnabled) ? aiBRollSlots : [],
         });
-      }
-
-      if (uploadedVideoUrl && videoRef.current) {
-        prevVideoLoop = videoRef.current.loop;
-        videoRef.current.loop = false;
-        // Mute HTMLVideoElement speaker output if we are already playing decoded audio through AudioContext
-        if (activeBufferSource) {
-          prevVideoMuted = videoRef.current.muted;
-          videoRef.current.muted = true;
-        }
-        videoRef.current.currentTime = 0;
-        await videoRef.current.play().catch(() => {});
       }
 
       if (activeBufferSource) {
@@ -2737,6 +3700,7 @@ export default function App() {
 
       recorder.start(100);
       const startWallClock = performance.now();
+      const frameIntervalMs = Math.max(12, Math.round(1000 / chosenFps));
 
       // Real-time synchronized render loop so Video + Captions + Audio stay 100% in sync!
       while (!stopExportEarlyRef.current) {
@@ -2758,14 +3722,35 @@ export default function App() {
 
         setCurrentTime(simTime);
         setExportProgress(
-          Math.min(99, Math.round((Math.min(simTime, wallElapsed) / totalDuration) * 100))
+          Math.min(
+            99,
+            Math.round((Math.min(simTime, wallElapsed) / totalDuration) * 100)
+          )
         );
 
-        if (ctx) {
+        const activeBrollAtExport =
+          Boolean(styleConfig.brollEnabled) &&
+          tracksConfig.broll.enabled &&
+          tracksConfig.broll.visible
+            ? brollClips.find(
+                (c) =>
+                  !c.hidden && simTime >= c.startTime && simTime <= c.endTime
+              ) || null
+            : null;
+
+        const activeVideo2AtExport =
+          tracksConfig.video2.enabled && tracksConfig.video2.visible
+            ? video2Clips.find(
+                (c) =>
+                  !c.hidden && simTime >= c.startTime && simTime <= c.endTime
+              ) || null
+            : null;
+
+        if (exportCtx) {
           renderReelCanvasFrame({
-            ctx,
-            canvasWidth: canvas.width,
-            canvasHeight: canvas.height,
+            ctx: exportCtx,
+            canvasWidth: exportCanvas.width,
+            canvasHeight: exportCanvas.height,
             videoElement: videoRef.current,
             hasUploadedVideo: Boolean(uploadedVideoUrl),
             sampleReel: activeSampleReel,
@@ -2773,10 +3758,34 @@ export default function App() {
             segments,
             style: cleanExportStyle,
             isExportRender: true,
+            isDraggingCaption: false,
+            activeTimelineBroll: activeBrollAtExport,
+            activeTimelineVideo2: activeVideo2AtExport,
+            aiBRollSlots: Boolean(styleConfig.brollEnabled) ? aiBRollSlots : [],
           });
         }
 
-        await new Promise((r) => setTimeout(r, 16));
+        // Also update the on-screen preview canvas so the user sees live playback while exporting
+        if (previewCtx && previewCanvas) {
+          renderReelCanvasFrame({
+            ctx: previewCtx,
+            canvasWidth: previewCanvas.width,
+            canvasHeight: previewCanvas.height,
+            videoElement: videoRef.current,
+            hasUploadedVideo: Boolean(uploadedVideoUrl),
+            sampleReel: activeSampleReel,
+            currentTime: simTime,
+            segments,
+            style: cleanExportStyle,
+            isExportRender: true,
+            isDraggingCaption: false,
+            activeTimelineBroll: activeBrollAtExport,
+            activeTimelineVideo2: activeVideo2AtExport,
+            aiBRollSlots: Boolean(styleConfig.brollEnabled) ? aiBRollSlots : [],
+          });
+        }
+
+        await new Promise((r) => setTimeout(r, frameIntervalMs));
       }
 
       if (activeBufferSource) {
@@ -2798,11 +3807,11 @@ export default function App() {
       setExportProgress(100);
 
       const safePreset = (styleConfig.presetId || 'sidz').toLowerCase();
-      const filename = `vakyareel-${safePreset}-${styleConfig.primaryTrack}.${formatInfo.extension}`;
+      const filename = `vakyareel-${safePreset}-${styleConfig.primaryTrack}-${chosenRes}.${formatInfo.extension}`;
 
       triggerFileDownload(videoBlob, filename, formatInfo.blobMimeType);
       showToast(
-        `Exported ${chosenFormat.toUpperCase()} Video + Audio (${filename})!`
+        `Exported ${chosenRes.toUpperCase()} (${resMeta.width}×${resMeta.height}) ${chosenFormat.toUpperCase()} Video + Audio (${filename})!`
       );
     } catch (err: unknown) {
       setErrorBanner(
@@ -2816,6 +3825,40 @@ export default function App() {
       }
       setIsExportingVideo(false);
       setIsPlaying(true);
+    }
+  };
+
+  const handleTriggerPrimaryExport = () => {
+    switch (exportType) {
+      case 'video':
+        handleExportBurnedVideo(exportFormat, exportResolution, exportFps);
+        break;
+      case 'srt':
+        handleExportSRT();
+        break;
+      case 'premiere-xml':
+        handleExportPremiereNativeXML();
+        break;
+      case 'davinci-fcpxml':
+        handleExportDaVinciFCPXML();
+        break;
+      case 'davinci-edl':
+        handleExportDaVinciEDL();
+        break;
+      case 'alpha-webm':
+        handleExportAlphaOverlay(exportResolution);
+        break;
+      case 'vtt':
+        handleExportVTT();
+        break;
+      case 'json':
+        handleExportJSON();
+        break;
+      case 'wav':
+        handleExportAudioWAV(false);
+        break;
+      default:
+        handleExportBurnedVideo(exportFormat, exportResolution, exportFps);
     }
   };
 
@@ -2904,21 +3947,33 @@ export default function App() {
   const selectedLineDisplayNum =
     currentEditableSegment?.displayLineNumber ?? 48 + currentEditableSegmentIdx;
 
-  // Automatically trigger open-source SFX when active caption changes during playback
+  // Only trigger SFX when explicitly chosen on that caption line OR when Auto SFX is explicitly enabled by the user (Off by default)
   useEffect(() => {
-    if (!isPlaying || isMuted || styleConfig.autoSfxEnabled === false) return;
+    if (!isPlaying || isMuted) return;
     if (!activeSegmentAtPlayhead) return;
     if (lastPlayedSfxSegIdRef.current === activeSegmentAtPlayhead.id) return;
     lastPlayedSfxSegIdRef.current = activeSegmentAtPlayhead.id;
 
-    const primaryText =
-      activeSegmentAtPlayhead.tracks[styleConfig.primaryTrack]?.text ||
-      activeSegmentAtPlayhead.tracks.tinglish?.text ||
-      '';
-    const sfxToPlay =
-      activeSegmentAtPlayhead.sfxType || detectContextSfxForText(primaryText);
-    if (sfxToPlay && sfxToPlay !== 'none') {
-      playOpenSourceSoundEffect(sfxToPlay, styleConfig.sfxVolume ?? 0.4);
+    const explicitLineSfx =
+      activeSegmentAtPlayhead.sfxType &&
+      activeSegmentAtPlayhead.sfxType !== 'none'
+        ? activeSegmentAtPlayhead.sfxType
+        : undefined;
+
+    if (explicitLineSfx) {
+      playOpenSourceSoundEffect(explicitLineSfx, styleConfig.sfxVolume ?? 0.4);
+      return;
+    }
+
+    if (Boolean(styleConfig.autoSfxEnabled)) {
+      const primaryText =
+        activeSegmentAtPlayhead.tracks[styleConfig.primaryTrack]?.text ||
+        activeSegmentAtPlayhead.tracks.tinglish?.text ||
+        '';
+      const sfxToPlay = detectContextSfxForText(primaryText);
+      if (sfxToPlay && sfxToPlay !== 'none') {
+        playOpenSourceSoundEffect(sfxToPlay, styleConfig.sfxVolume ?? 0.4);
+      }
     }
   }, [
     activeSegmentAtPlayhead,
@@ -2930,7 +3985,49 @@ export default function App() {
     currentEditableSegmentIdx,
   ]);
 
+  // Trigger Synchronized Magical B-Roll Sound Effects ONLY when B-Roll is enabled and a sound preset is explicitly chosen (Off by default)
+  useEffect(() => {
+    if (!isPlaying || isMuted || !styleConfig.brollEnabled) {
+      return;
+    }
+
+    const activeSlot = aiBRollSlots.find(
+      (slot) =>
+        slot.enabled &&
+        ((activeSegmentAtPlayhead &&
+          (activeSegmentAtPlayhead.aiBrollSlotId === slot.id ||
+            slot.linkedSegmentId === activeSegmentAtPlayhead.id)) ||
+          (currentTime >= slot.startTime && currentTime <= slot.endTime))
+    );
+
+    if (!activeSlot) {
+      lastPlayedBrollSlotRef.current = null;
+      return;
+    }
+
+    if (lastPlayedBrollSlotRef.current === activeSlot.id) return;
+    lastPlayedBrollSlotRef.current = activeSlot.id;
+
+    if (activeSlot.sfxPreset && activeSlot.sfxPreset !== 'none') {
+      playMagicalBRollSoundEffect(
+        activeSlot.sfxPreset,
+        styleConfig.sfxVolume ?? 0.45
+      );
+    }
+  }, [
+    currentTime,
+    activeSegmentAtPlayhead,
+    aiBRollSlots,
+    isPlaying,
+    isMuted,
+    styleConfig.brollEnabled,
+    styleConfig.aiBrollSfxEnabled,
+    styleConfig.sfxVolume,
+  ]);
+
   const activeAspectRatio: VideoAspectRatio = styleConfig.aspectRatio || '9:16';
+  const isMobileTallVideo =
+    mobileWorkspaceTab === 'video' || mobileWorkspaceTab === 'all';
   const canvasDimensions =
     activeAspectRatio === '16:9'
       ? {
@@ -2938,22 +4035,24 @@ export default function App() {
           height: 1080,
           ratioLabel: '16:9 Landscape · 1920×1080',
           aspectClass:
-            'aspect-[16/9] w-full max-w-[740px] max-h-[54vh] rounded-xl',
+            'aspect-[16/9] w-full max-w-[780px] max-h-[24dvh] sm:max-h-[30dvh] lg:max-h-[68vh] rounded-xl',
         }
       : activeAspectRatio === '1:1'
         ? {
             width: 1080,
             height: 1080,
             ratioLabel: '1:1 Square · 1080×1080',
-            aspectClass:
-              'aspect-square h-[52vh] max-h-[480px] min-h-[260px] w-auto max-w-full rounded-xl',
+            aspectClass: isMobileTallVideo
+              ? 'aspect-square h-[44dvh] sm:h-[52dvh] lg:h-[68vh] max-h-[620px] lg:min-h-[300px] w-auto max-w-full rounded-xl'
+              : 'aspect-square h-full max-h-[24dvh] sm:max-h-[28dvh] lg:h-[68vh] lg:max-h-[620px] lg:min-h-[300px] w-auto max-w-full rounded-xl',
           }
         : {
             width: 1080,
             height: 1920,
             ratioLabel: '9:16 Mobile View · 1080×1920',
-            aspectClass:
-              'aspect-[9/16] h-[56vh] max-h-[540px] min-h-[300px] w-auto max-w-full rounded-xl',
+            aspectClass: isMobileTallVideo
+              ? 'aspect-[9/16] h-[48dvh] sm:h-[56dvh] lg:h-[74vh] max-h-[720px] lg:min-h-[340px] w-auto max-w-full rounded-xl'
+              : 'aspect-[9/16] h-full max-h-[24dvh] sm:max-h-[28dvh] lg:h-[74vh] lg:max-h-[720px] lg:min-h-[340px] w-auto max-w-full rounded-xl',
           };
 
   const scrollToSection = (id: string) => {
@@ -3015,78 +4114,52 @@ export default function App() {
     return (
       <>
         {toastMessage && (
-          <div className="fixed bottom-5 right-5 z-50 bg-[#24242B]/95 backdrop-blur-xl border border-white/15 text-white px-4 py-2.5 rounded-2xl shadow-2xl text-xs font-medium flex items-center gap-2">
-            <Sparkles className="w-4 h-4 text-[#FF5A1F]" />
+          <div className="fixed bottom-5 right-5 z-[60] bg-[#24242B]/95 backdrop-blur-xl border border-white/15 text-white px-4 py-2.5 rounded-2xl shadow-2xl text-xs font-medium flex items-center gap-2">
+            <Sparkles className="w-4 h-4 text-[#10b981]" />
             <span>{toastMessage}</span>
           </div>
         )}
-        <MerupifyDashboardApp
-          user={activeDashboardUser}
+        <KalakarShellHubModal
+          isOpen={true}
+          activeView={shellHubActiveView}
           userPlan={userPlan}
-          styleConfig={styleConfig}
-          presets={presets}
-          audioEnhancer={audioEnhancer}
-          uploadedVideoName={uploadedVideoName}
-          activeSampleReel={activeSampleReel}
+          audioCleansRemaining={audioEnhancer.remainingCredits ?? 3}
+          onChangeView={setShellHubActiveView}
           onSelectPlan={(plan) => {
             setUserPlan(plan);
             showToast(`Switched to ${plan.toUpperCase()} Plan!`);
           }}
-          onUpdateStyle={handleUpdateStyleAndSyncPreset}
-          onUpdateAudioEnhancer={(partial) =>
-            setAudioEnhancer((prev) => ({ ...prev, ...partial }))
-          }
-          onUploadVideoFile={(file) => {
-            handleUploadFile(file, true);
+          onClose={() => setAppScreenMode('editor')}
+          onSelectSampleReel={(reel) => {
+            handleSelectSampleReel(reel);
             setAppScreenMode('editor');
           }}
-          onOpenRecordCamera={() => {
+          onUploadFile={(file) => {
+            handleUploadFile(file, true);
             setAppScreenMode('editor');
-            openCameraModal();
           }}
           onOpenPrepareMedia={() => {
             setAppScreenMode('editor');
             setIsPrepareMediaOpen(true);
           }}
-          onSelectSampleReelAndEdit={(reel) => {
-            handleSelectSampleReel(reel);
-            setAppScreenMode('editor');
-          }}
-          onApplyPresetAndEdit={(preset) => {
-            handleApplyPreset(preset);
-            setAppScreenMode('editor');
-          }}
-          onSelectTrackAndEdit={(track) => {
-            handleSelectPrimaryTrack(track);
-            setAppScreenMode('editor');
-          }}
-          onGenerateAiBrollNow={() => {
-            handleUpdateStyleAndSyncPreset({ brollEnabled: true });
-            showToast('AI B-Roll Cutaways & Context Effects enabled in Studio!');
-          }}
           onExportPremiereXML={handleExportPremiereXML}
           onExportAlphaWebM={handleExportAlphaOverlay}
-          onExportSRT={handleExportSRT}
-          onExportWAV={() => handleExportAudioWAV(true)}
-          onOpenStudioEditor={() => setAppScreenMode('editor')}
-          onBackToLandingPage={() => setAppScreenMode('landing')}
-          onLogout={() => {
-            setCurrentUser(null);
-            try {
-              localStorage.removeItem(AUTH_USER_STORAGE_KEY);
-            } catch {
-              // ignore
-            }
-            setAppScreenMode('landing');
-            showToast('Signed out of Merupify Dashboard');
-          }}
+        />
+        <CloudCostEstimatorModal
+          isOpen={isCostEstimatorOpen}
+          onClose={() => setIsCostEstimatorOpen(false)}
+          activeVideoDurationSec={duration}
+          activeVideoName={uploadedVideoName || activeSampleReel.title}
+          segments={segments}
+          primaryTrack={styleConfig.primaryTrack}
+          onShowToast={showToast}
         />
       </>
     );
   }
 
   return (
-    <div className="h-screen flex flex-col bg-[#0D0D10] text-zinc-100 overflow-hidden">
+      <div className="h-[100dvh] flex flex-col bg-[#0D0D10] text-zinc-100 overflow-hidden">
       {uploadedVideoUrl && (
         <video
           ref={videoRef}
@@ -3141,93 +4214,95 @@ export default function App() {
               e.currentTarget.play().catch(() => {});
             }
           }}
-          className="fixed -left-[9999px] -top-[9999px] w-1 h-1 opacity-0 pointer-events-none"
+          className="fixed top-0 left-0 w-2 h-2 opacity-[0.005] pointer-events-none -z-10"
         />
       )}
 
-      {/* MERUPIFY / KALAKAR STUDIO TOP HEADER BAR */}
-      <header className="sticky top-0 z-40 h-12 flex items-center justify-between gap-4 px-3.5 border-b border-white/[0.06] bg-[#111115] shrink-0 select-none">
-        {/* Left Zone: Back to Dashboard Arrow + Brand Icon + Filename + Undo/Redo + Aspect Ratio Switcher */}
-        <div className="flex items-center gap-2.5 min-w-0">
-          <button
-            type="button"
-            onClick={() => setAppScreenMode('dashboard')}
-            title="Back to Merupify Dashboard App"
-            className="px-2 py-1 rounded-lg text-zinc-300 hover:text-white bg-white/[0.04] hover:bg-white/[0.09] border border-white/[0.07] flex items-center gap-1.5 text-xs font-medium transition-colors cursor-pointer shrink-0"
-          >
-            <ArrowLeft className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">Dashboard</span>
-          </button>
-
-          {/* Merupify / Kalakar Brand Icon */}
+      {/* MERUPIFY STUDIO TOP HEADER BAR (Responsive Mobile + Desktop) */}
+      <header className="sticky top-0 z-40 h-12 sm:h-14 flex items-center justify-between gap-1.5 sm:gap-4 px-2.5 sm:px-4 border-b border-white/[0.06] bg-[#131315] shrink-0 select-none">
+        {/* Left Zone: Back Arrow / Home + Filename + Divider + Undo/Redo */}
+        <div className="flex items-center gap-1.5 sm:gap-3 min-w-0">
           <button
             type="button"
             onClick={() => {
-              setShowKalakarHero((v) => !v);
+              setShellHubActiveView('home');
+              setIsShellHubOpen(true);
             }}
-            title="Toggle Studio Overview Banner"
-            className="w-6 h-6 rounded-md bg-gradient-to-br from-[#FF5722] via-[#FFD60A] to-[#2BAE66] flex items-center justify-center text-zinc-950 font-black text-xs shadow-sm cursor-pointer shrink-0"
+            title="Open Merupify Dashboard (Home, Tutorials, Subscription, Plugins, Refer & Earn, Support)"
+            className="w-7 h-7 sm:w-8 sm:h-8 flex items-center justify-center rounded-lg bg-[#162a23] hover:bg-[#1f3b31] border border-[#1f4035] text-emerald-400 transition-colors cursor-pointer shrink-0"
           >
-            M
+            <ArrowLeft className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
           </button>
 
           {/* Project Filename */}
-          <span className="text-xs font-medium text-zinc-200 truncate max-w-[180px] sm:max-w-[240px]">
-            {uploadedVideoName || activeSampleReel.title}
-          </span>
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="text-xs sm:text-sm font-medium text-[#E5E1E4] truncate max-w-[85px] xs:max-w-[120px] sm:max-w-[260px]">
+              {uploadedVideoName || activeSampleReel.title}
+            </span>
+          </div>
+
+          <div className="h-4 w-[1px] bg-white/[0.08] mx-1 hidden sm:block" />
 
           {/* Undo / Redo Icons */}
-          <div className="hidden sm:flex items-center gap-0.5 ml-1 text-zinc-500">
+          <div className="hidden sm:flex items-center gap-1 text-[#8E9192]">
             <button
               type="button"
               onClick={() => handleResetPresets()}
               title="Undo / Reset style change"
-              className="p-1.5 rounded hover:bg-white/[0.05] hover:text-zinc-300 cursor-pointer"
+              className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-white/[0.06] hover:text-[#E5E1E4] transition-colors cursor-pointer"
             >
-              <Undo2 className="w-3.5 h-3.5" />
+              <Undo2 className="w-4 h-4" />
             </button>
             <button
               type="button"
               onClick={() => showToast('Redo stack up to date')}
               title="Redo"
-              className="p-1.5 rounded hover:bg-white/[0.05] hover:text-zinc-300 cursor-pointer"
+              className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-white/[0.06] hover:text-[#E5E1E4] transition-colors cursor-pointer opacity-60"
             >
-              <Redo2 className="w-3.5 h-3.5" />
+              <Redo2 className="w-4 h-4" />
             </button>
-          </div>
-
-          {/* Compact Aspect Ratio Switcher (9:16 | 16:9 | 1:1) */}
-          <div className="hidden lg:flex items-center bg-[#18181F] rounded-lg border border-white/[0.06] p-0.5 ml-2">
-            {(['9:16', '16:9', '1:1'] as VideoAspectRatio[]).map((ratio) => {
-              const active = (styleConfig.aspectRatio || '9:16') === ratio;
-              return (
-                <button
-                  key={ratio}
-                  type="button"
-                  onClick={() =>
-                    handleUpdateStyleAndSyncPreset({ aspectRatio: ratio })
-                  }
-                  className={`px-2 py-0.5 rounded-md text-[10px] font-mono-tabular font-semibold transition-all cursor-pointer ${
-                    active
-                      ? 'bg-[#25252E] text-white shadow-sm'
-                      : 'text-zinc-400 hover:text-zinc-200'
-                  }`}
-                >
-                  {ratio}
-                </button>
-              );
-            })}
           </div>
         </div>
 
-        {/* Center Zone: Aura Pill Button + Quick Studio Modals */}
-        <div className="hidden md:flex items-center gap-2">
+        {/* Center Zone: Module Switcher (Studio | Remotion) + Aura Toggle */}
+        <div className="flex items-center justify-center gap-1.5 sm:gap-2.5 shrink-0">
+          {/* Dedicated Module Switcher: Standard Studio vs Remotion Engine */}
+          <div className="flex items-center p-0.5 rounded-lg bg-[#1C1B1E] border border-white/[0.08]">
+            <button
+              type="button"
+              onClick={() => setStudioModuleMode('standard')}
+              className={`px-2 sm:px-3 py-1 rounded-md text-[11px] sm:text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap ${
+                studioModuleMode === 'standard'
+                  ? 'bg-[#24B47E] text-[#050505] shadow-sm'
+                  : 'text-[#8E9192] hover:text-white'
+              }`}
+            >
+              Studio
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setStudioModuleMode('remotion');
+                showToast('Switched to Dedicated Remotion Video & Caption Editing Module');
+              }}
+              className={`px-2 sm:px-3 py-1 rounded-md text-[11px] sm:text-xs font-semibold flex items-center gap-1 sm:gap-1.5 transition-colors cursor-pointer whitespace-nowrap ${
+                studioModuleMode === 'remotion'
+                  ? 'bg-[#0B84F3] text-white shadow-sm'
+                  : 'text-[#8E9192] hover:text-white'
+              }`}
+              title="Open Dedicated Remotion Programmatic Video & Caption Editing Module (remotion-dev/remotion)"
+            >
+              <Code2 className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
+              <span>Remotion</span>
+            </button>
+          </div>
+
           <button
             type="button"
             onClick={() => {
               const nextBroll = !styleConfig.brollEnabled;
               handleUpdateStyleAndSyncPreset({ brollEnabled: nextBroll });
-              if (nextBroll) {
+              if (nextBroll && Boolean(styleConfig.autoSfxEnabled)) {
                 playOpenSourceSoundEffect('whoosh', styleConfig.sfxVolume ?? 0.45);
               }
               showToast(
@@ -3236,56 +4311,55 @@ export default function App() {
                   : '✦ Aura AI B-Roll Cutaways Paused'
               );
             }}
-            className={`px-3.5 py-1 rounded-lg text-xs font-medium flex items-center gap-1.5 border transition-all cursor-pointer ${
+            className={`hidden md:flex items-center gap-2 px-4 py-1.5 rounded-full border transition-all group cursor-pointer ${
               styleConfig.brollEnabled
-                ? 'bg-[#152E23] border-[#2BAE66]/60 text-[#34D399]'
-                : 'bg-[#1A1A20] hover:bg-[#22222A] border-white/[0.08] text-zinc-300'
+                ? 'bg-[#24B47E]/15 border-[#24B47E]/50 text-[#24B47E]'
+                : 'bg-[#1C1B1E] border-white/[0.08] hover:border-[#24B47E]/40 text-[#E5E1E4]'
             }`}
             title="Toggle Aura AI B-Roll Context Cutaways & Motion Effects"
           >
-            <Sparkles className="w-3.5 h-3.5 text-[#34D399]" />
-            <span>Aura</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setIsPrepareMediaOpen(true)}
-            className="px-2.5 py-1 rounded-lg text-[11px] font-medium bg-[#18181E] hover:bg-[#22222A] border border-white/[0.06] text-zinc-300 hover:text-white transition-colors cursor-pointer"
-          >
-            101 Languages
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setIsAgentAndTesterOpen(true)}
-            className="px-2.5 py-1 rounded-lg text-[11px] font-medium bg-[#18181E] hover:bg-[#22222A] border border-white/[0.06] text-emerald-400 hover:text-emerald-300 transition-colors cursor-pointer"
-          >
-            Agent &amp; Tester
+            <Sparkles className="w-4 h-4 text-[#24B47E] group-hover:scale-110 transition-transform" />
+            <span className="text-xs font-semibold tracking-wide text-[#E5E1E4]">
+              Aura
+            </span>
           </button>
         </div>
 
-        {/* Right Zone: Upgrade + Green Export Button + Avatar */}
-        <div className="flex items-center gap-2 shrink-0">
+        {/* Right Zone: Cost ($ / ₹) + Upgrade + Green Export Button + Avatar */}
+        <div className="flex items-center gap-1.5 sm:gap-3 shrink-0">
+          <button
+            type="button"
+            onClick={() => setIsCostEstimatorOpen(true)}
+            title="Google Cloud & Google TTS 1-Minute Cost Estimator (USD $ & INR ₹)"
+            className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#1C1B1E] hover:bg-[#2A2A2D] border border-white/[0.08] text-xs font-medium text-[#E5E1E4] transition-colors cursor-pointer whitespace-nowrap shrink-0"
+          >
+            <Calculator className="w-3.5 h-3.5 text-[#24B47E]" />
+            <span>Cost ($ / ₹)</span>
+          </button>
+
           <button
             type="button"
             onClick={() => {
               setShellHubActiveView('subscriptions');
               setIsShellHubOpen(true);
             }}
-            className="px-3 py-1.5 rounded-lg bg-[#1A1A21] hover:bg-[#24242D] border border-white/[0.08] text-xs font-medium text-zinc-200 flex items-center gap-1.5 transition-colors cursor-pointer"
+            className="hidden xs:flex items-center gap-1 sm:gap-1.5 px-2 sm:px-3 py-1.5 rounded-lg bg-[#1C1B1E] hover:bg-[#2A2A2D] text-[#E5E1E4] text-xs font-medium border border-white/[0.08] transition-colors cursor-pointer whitespace-nowrap shrink-0"
           >
-            <Zap className="w-3.5 h-3.5 text-amber-400" />
-            <span>Upgrade</span>
+            <Zap className="w-3.5 h-3.5 text-[#24B47E]" />
+            <span className="hidden sm:inline">Upgrade</span>
           </button>
 
           <button
             type="button"
-            onClick={() => handleExportBurnedVideo(exportFormat)}
-            className="px-3.5 py-1.5 text-xs font-semibold text-white bg-[#2BAE66] hover:bg-[#249957] rounded-lg shadow-sm transition-all whitespace-nowrap shrink-0 cursor-pointer flex items-center gap-1.5"
+            onClick={() => setIsExportDrawerOpen(true)}
+            className="flex items-center gap-1 sm:gap-1.5 px-2.5 sm:px-4 py-1.5 rounded-lg bg-[#24B47E] hover:bg-[#199A68] text-[#050505] text-[11px] sm:text-xs font-bold shadow-[0_0_20px_rgba(36,180,126,0.2)] transition-all whitespace-nowrap shrink-0 cursor-pointer"
+            title="Open Export Panel (720p, 1080p, 4K Video, .SRT, Premiere Pro & DaVinci Resolve)"
           >
             <Download className="w-3.5 h-3.5" />
             <span>
-              {isExportingVideo ? `Exporting ${exportProgress}%` : 'Export'}
+              {isExportingVideo
+                ? `${exportResolution.toUpperCase()} (${exportProgress}%)`
+                : 'Export'}
             </span>
           </button>
 
@@ -3295,10 +4369,10 @@ export default function App() {
               setShellHubActiveView('home');
               setIsShellHubOpen(true);
             }}
-            title="Account & App Hub"
-            className="w-7 h-7 rounded-full bg-gradient-to-tr from-zinc-700 to-zinc-500 border border-white/15 flex items-center justify-center text-[11px] font-bold text-white cursor-pointer shrink-0"
+            title="Merupify Account & App Hub"
+            className="w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-gradient-to-tr from-[#24B47E] to-[#4CE0B3] flex items-center justify-center text-[#050505] font-bold text-xs cursor-pointer ring-2 ring-white/[0.06] shrink-0"
           >
-            L
+            M
           </button>
         </div>
       </header>
@@ -3338,17 +4412,139 @@ export default function App() {
         </div>
       )}
 
-      {/* MAIN KALAKAR STUDIO WORKSPACE: Left+Center (Top Split + Bottom Timeline Dock) + Right Full-Height Inspector */}
+      {/* MAIN MERUPIFY 3-COLUMN STUDIO WORKSPACE OR DEDICATED REMOTION STUDIO MODULE */}
+      {studioModuleMode === 'remotion' ? (
+        <RemotionStudioModule
+          segments={segments}
+          currentTime={currentTime}
+          duration={duration}
+          isPlaying={isPlaying}
+          isMuted={isMuted}
+          styleConfig={styleConfig}
+          uploadedVideoUrl={uploadedVideoUrl}
+          uploadedVideoName={uploadedVideoName}
+          aiBRollSlots={aiBRollSlots}
+          brollClips={brollClips}
+          musicClips={musicClips}
+          isExportingVideo={isExportingVideo}
+          exportProgress={exportProgress}
+          exportFormat={exportFormat}
+          onSeekTo={handleSeekTo}
+          onTogglePlayPause={togglePlayPause}
+          onToggleMute={() => setIsMuted((m) => !m)}
+          onUpdateSegmentText={handleUpdateSegmentText}
+          onToggleWordHero={handleToggleWordHero}
+          onUpdateStyle={handleUpdateStyleAndSyncPreset}
+          onExportBurnedVideo={handleExportBurnedVideo}
+          onExportSRT={handleExportSRT}
+          onSwitchToStandardStudio={() => setStudioModuleMode('standard')}
+          onShowToast={showToast}
+        />
+      ) : (
       <main
         id="studio-workspace"
-        className="flex-1 flex flex-col lg:flex-row h-[calc(100vh-48px)] overflow-hidden"
+        className={`flex-1 flex flex-col lg:flex-row h-[calc(100dvh-48px)] sm:h-[calc(100dvh-56px)] ${
+          mobileWorkspaceTab === 'all'
+            ? 'overflow-y-auto lg:overflow-hidden'
+            : 'overflow-hidden'
+        } bg-[#0B0B0D]`}
       >
-        {/* LEFT + CENTER COMPOSITE AREA (Top: Captions List + Left Rail + Centered Video Preview; Bottom: Kalakar Multi-Track Timeline) */}
-        <div className="order-1 lg:order-1 flex-1 min-w-0 flex flex-col lg:h-full overflow-hidden">
-          {/* TOP SPLIT: Left Captions Panel + Center Video Preview Stage */}
-          <div className="flex-1 min-h-0 flex flex-col lg:flex-row overflow-hidden">
-            {/* LEFT TOP PANEL: Kalakar Captions List + Left Vertical Tool Rail */}
-            <TranscriptLanguagePanel
+        {/* COLUMN 1 (LEFT ON DESKTOP, BOTTOM ON MOBILE): Top Captions Panel + Bottom Dynamic Editing Panel (Captions, Video 1, Audio 1 Tracks). */}
+        {isLeftColumnCollapsed ? (
+          <aside
+            className={`${
+              mobileWorkspaceTab === 'captions' ||
+              mobileWorkspaceTab === 'timeline' ||
+              mobileWorkspaceTab === 'all'
+                ? 'flex'
+                : 'hidden lg:flex'
+            } order-4 lg:order-1 w-full lg:w-11 shrink-0 border-r border-white/[0.08] bg-[#131315] lg:flex-col items-center justify-between lg:justify-start py-2.5 px-3 lg:px-0 lg:py-4 select-none relative z-30 overflow-visible`}
+          >
+            {/* Middle Right-Edge Expand Toggle Button */}
+            <button
+              type="button"
+              onClick={() => setIsLeftColumnCollapsed(false)}
+              title="Expand Left Captions Panel"
+              className="hidden lg:flex absolute -right-4 top-1/2 -translate-y-1/2 z-50 w-4 h-12 rounded-r-lg bg-[#1C1C22] hover:bg-[#10b981] border border-l-0 border-white/25 items-center justify-center text-[#10b981] hover:text-[#032b1d] cursor-pointer shadow-lg transition-colors"
+            >
+              <ChevronRight className="w-3.5 h-3.5 stroke-[2.5]" />
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setIsLeftColumnCollapsed(false)}
+              title="Expand Left Captions & Timeline Panel"
+              className="p-2 rounded-lg bg-[#10b981] text-[#032b1d] hover:bg-[#34d399] cursor-pointer shadow-lg flex items-center gap-1.5 font-bold"
+            >
+              <ChevronRight className="w-4 h-4" />
+              <span className="lg:hidden text-xs font-bold">
+                Expand Captions
+              </span>
+            </button>
+            <span className="hidden lg:block mt-4 text-[10px] font-bold text-[#94a3b8] [writing-mode:vertical-rl] tracking-widest uppercase">
+              Captions &amp; Tracks
+            </span>
+          </aside>
+        ) : (
+          <div
+            className={`${
+              mobileWorkspaceTab === 'captions' ||
+              mobileWorkspaceTab === 'timeline' ||
+              mobileWorkspaceTab === 'all'
+                ? 'flex'
+                : 'hidden lg:flex'
+            } order-4 lg:order-1 flex-1 min-w-0 lg:min-w-[360px] flex-col ${
+              mobileWorkspaceTab === 'all' ? 'min-h-[680px] shrink-0 lg:min-h-0 lg:shrink' : 'min-h-0'
+            } lg:h-full border-r border-white/[0.06] bg-[#131315] relative z-30 overflow-visible transition-all duration-200`}
+          >
+            {/* Dynamic Right-Edge Drag Resizer + Collapse Toggle Handle */}
+            <div
+              onMouseDown={(e) => {
+                e.preventDefault();
+                isResizingLeftColRef.current = true;
+                const startX = e.clientX;
+                const startW = leftColumnWidthPx;
+                const onMove = (moveEvent: MouseEvent) => {
+                  if (!isResizingLeftColRef.current) return;
+                  const nextW = Math.max(
+                    340,
+                    Math.min(760, startW + (moveEvent.clientX - startX))
+                  );
+                  setLeftColumnWidthPx(nextW);
+                };
+                const onUp = () => {
+                  isResizingLeftColRef.current = false;
+                  window.removeEventListener('mousemove', onMove);
+                  window.removeEventListener('mouseup', onUp);
+                };
+                window.addEventListener('mousemove', onMove);
+                window.addEventListener('mouseup', onUp);
+              }}
+              onDoubleClick={() => setLeftColumnWidthPx(500)}
+              title="Drag to resize Captions & Timeline Column · Double-click to reset width"
+              className="hidden lg:flex absolute -right-1.5 inset-y-0 z-30 w-3 cursor-col-resize items-center justify-center group"
+            >
+              <div className="w-[2px] h-full bg-transparent group-hover:bg-[#10b981]/75 transition-colors" />
+              <div className="absolute top-1/2 -translate-y-14 w-1 h-8 rounded-full bg-white/20 group-hover:bg-[#10b981] transition-colors" />
+            </div>
+
+            {/* Prominent Minimize / Collapse Arrow Toggle on the Left Panel Right Edge (Matching Screenshot 2) */}
+            <button
+              type="button"
+              onClick={() => setIsLeftColumnCollapsed(true)}
+              title="Minimize / Collapse Left Captions Panel"
+              className="hidden lg:flex absolute -right-4 top-1/2 -translate-y-1/2 z-50 w-4 h-12 rounded-r-lg bg-[#1C1C22] hover:bg-[#10b981] border border-l-0 border-white/25 items-center justify-center text-zinc-200 hover:text-[#032b1d] cursor-pointer shadow-lg transition-colors"
+            >
+              <ChevronLeft className="w-3.5 h-3.5 stroke-[2.5]" />
+            </button>
+
+            {/* TOP OF LEFT COLUMN: Left Vertical Rail + Captions List */}
+            <div
+              className={`${
+                mobileWorkspaceTab === 'timeline' ? 'hidden lg:flex' : 'flex'
+              } flex-1 min-h-0 flex-col w-full overflow-hidden`}
+            >
+              <TranscriptLanguagePanel
               segments={segments}
               currentTime={currentTime}
               duration={duration}
@@ -3420,361 +4616,650 @@ export default function App() {
                 setIsShellHubOpen(true);
               }}
               focusedSection={focusedSection}
+              aiBRollSlots={aiBRollSlots}
+              isAnalyzingBRollScript={isAnalyzingBRollScript}
+              onUpdateBRollSlot={handleUpdateBRollSlot}
+              onAnalyzeAndGenerateAllThreeBRolls={handleAnalyzeAndGenerateAllThreeBRolls}
+              onRegenerateSingleBRollSlotImage={handleRegenerateSingleBRollSlotImage}
+              onGenerateSegmentCustomBRoll={handleGenerateSegmentCustomBRoll}
+              onSelectLineForStyling={(segmentId) => {
+                setActiveLineStylingSegmentId(segmentId);
+              }}
+              onOpenRemotionModule={() => {
+                setStudioModuleMode('remotion');
+                showToast('Switched to Dedicated Remotion Video & Caption Editing Module');
+              }}
             />
+            </div>
 
-            {/* CENTER VIDEO PREVIEW STAGE — Minimal & Effective (Exact match to screenshot) */}
-            <section
-              ref={canvasWrapperRef}
-              className="flex-1 min-w-0 flex flex-col items-center justify-between p-3 bg-[#0D0D10] overflow-hidden select-none"
+            {/* BOTTOM OF LEFT COLUMN: Dynamic Editing Panel for Captions, Video, and Audio Tracks */}
+            <div
+              className={`${
+                mobileWorkspaceTab === 'captions' ? 'hidden lg:flex' : 'flex'
+              } ${
+                mobileWorkspaceTab === 'timeline'
+                  ? 'flex-1 min-h-0'
+                  : 'shrink-0'
+              } flex-col w-full`}
             >
-              {/* Centered Video Canvas Container */}
-              <div className="flex-1 min-h-0 w-full flex items-center justify-center overflow-hidden">
-                <div
-                  className={`relative overflow-hidden border border-white/10 bg-black shadow-2xl transition-all duration-200 ${canvasDimensions.aspectClass}`}
-                >
-                  <canvas
-                    ref={canvasRef}
-                    width={canvasDimensions.width}
-                    height={canvasDimensions.height}
-                    onPointerDown={handleCanvasPointerDown}
-                    onPointerMove={handleCanvasPointerMove}
-                    onPointerUp={handleCanvasPointerUp}
-                    className={`w-full h-full object-contain touch-none block ${
-                      styleConfig.canvasPositionLocked
-                        ? 'cursor-not-allowed'
-                        : 'cursor-grab active:cursor-grabbing'
-                    }`}
-                  />
+              <PremiereMultiTrackTimeline
+                segments={segments}
+                currentTime={currentTime}
+                duration={duration}
+                styleConfig={styleConfig}
+                timelineZoom={timelineZoom}
+                timelineGranularity={timelineGranularity}
+                audioWaveformBars={audioWaveformBars}
+                uploadedVideoUrl={uploadedVideoUrl}
+                uploadedVideoName={uploadedVideoName}
+                videoClips={videoClips}
+                audioClips={audioClips}
+                brollClips={brollClips}
+                video2Clips={video2Clips}
+                musicClips={musicClips}
+                tracksConfig={tracksConfig}
+                isVideoAudioLinked={isVideoAudioLinked}
+                onChangeZoom={setTimelineZoom}
+                onChangeGranularity={setTimelineGranularity}
+                onToggleVideoAudioLinked={() => {
+                  setIsVideoAudioLinked((prev) => {
+                    const next = !prev;
+                    showToast(
+                      next
+                        ? 'Video 1 & Audio 1 LINKED: Razor cuts both tracks together'
+                        : 'Video 1 & Audio 1 SEPARATED: Cut Video & Audio independently!'
+                    );
+                    return next;
+                  });
+                }}
+                onUpdateTracksConfig={setTracksConfig}
+                onUpdateVideoClips={setVideoClips}
+                onUpdateAudioClips={setAudioClips}
+                onUpdateBrollClips={setBrollClips}
+                onUpdateVideo2Clips={setVideo2Clips}
+                onUpdateMusicClips={setMusicClips}
+                onSeekTo={handleSeekTo}
+                onAddWordOrSegment={handleAddSegment}
+                onDeleteSegment={handleDeleteSegment}
+                onDeleteWordInSegment={handleDeleteWordInSegment}
+                onSplitSegmentAtTime={handleSplitSegment}
+                onMergeSegmentWithNext={handleMergeSegmentWithNext}
+                onNudgeSegmentTiming={handleNudgeSingleSegmentTiming}
+                onToggleBehindSubject={(segId) => {
+                  const target = segments.find((s) => s.id === segId);
+                  if (target) {
+                    handleUpdateSegmentProps(segId, {
+                      behindSubject: !target.behindSubject,
+                    });
+                    showToast(
+                      !target.behindSubject
+                        ? 'Placed caption behind subject (Depth Mask ON)'
+                        : 'Placed caption in front of subject'
+                    );
+                  }
+                }}
+                onUpdateStyle={handleUpdateStyleAndSyncPreset}
+                onGenerateAiBroll={handleGenerateAiBrollTimelineClips}
+                onShowToast={showToast}
+              />
+            </div>
+          </div>
+        )}
 
-                  {isTranscribing && segments.length === 0 && (
-                    <div className="absolute inset-0 bg-black/75 backdrop-blur-md flex flex-col items-center justify-center p-6 text-center">
-                      <div className="w-9 h-9 rounded-full border-2 border-[#2BAE66] border-t-transparent animate-spin mb-3" />
-                      <p className="text-xs font-semibold text-white">
-                        Generating Captions...
-                      </p>
-                      <p className="text-[11px] text-zinc-400 mt-1">
-                        {transcribeStage || 'Processing audio...'}
-                      </p>
-                    </div>
-                  )}
+        {/* COLUMN 2 (CENTER ON DESKTOP, TOP DOCK ON MOBILE): Live Video Player Viewport + On-Screen Move Strip + Transport Bar */}
+        <section
+          ref={canvasWrapperRef}
+          style={
+            isLeftColumnCollapsed
+              ? undefined
+              : ({
+                  '--center-col-w': `${Math.max(
+                    360,
+                    Math.min(600, 430 + (500 - leftColumnWidthPx))
+                  )}px`,
+                } as React.CSSProperties)
+          }
+          className={`order-1 lg:order-2 w-full ${
+            isLeftColumnCollapsed
+              ? 'lg:flex-1'
+              : 'lg:w-[var(--center-col-w)] lg:shrink-0'
+          } ${
+            mobileWorkspaceTab === 'video'
+              ? 'flex-1 min-h-[340px]'
+              : mobileWorkspaceTab === 'all'
+              ? 'h-[56dvh] min-h-[340px] shrink-0'
+              : 'h-[40dvh] sm:h-[43dvh] min-h-[225px] max-h-[350px] shrink-0'
+          } min-w-0 lg:h-full lg:max-h-none flex flex-col items-center justify-between bg-[#0B0B0D] overflow-hidden select-none relative transition-all duration-200`}
+        >
+          {/* Centered Video Canvas Container */}
+          <div className="flex-1 min-h-0 w-full flex flex-col items-center justify-center p-1.5 sm:p-2.5 lg:p-4 overflow-hidden gap-1.5 lg:gap-2">
+            <div
+              className={`relative overflow-hidden bg-black shadow-[0_20px_50px_rgba(0,0,0,0.6)] transition-all duration-200 border border-white/10 ${
+                canvasDimensions.aspectClass
+              }`}
+            >
+              <canvas
+                ref={canvasRef}
+                width={canvasDimensions.width}
+                height={canvasDimensions.height}
+                onPointerDown={handleCanvasPointerDown}
+                onPointerMove={handleCanvasPointerMove}
+                onPointerUp={handleCanvasPointerUp}
+                className={`w-full h-full object-contain touch-none block ${
+                  styleConfig.canvasPositionLocked
+                    ? 'cursor-not-allowed'
+                    : 'cursor-grab active:cursor-grabbing'
+                }`}
+              />
+
+              {isTranscribing && segments.length === 0 && (
+                <div className="absolute inset-0 bg-black/75 backdrop-blur-md flex flex-col items-center justify-center p-6 text-center">
+                  <div className="w-9 h-9 rounded-full border-2 border-[#24B47E] border-t-transparent animate-spin mb-3" />
+                  <p className="text-xs font-semibold text-white">
+                    Generating Captions...
+                  </p>
+                  <p className="text-[11px] text-zinc-400 mt-1">
+                    {transcribeStage || 'Processing audio...'}
+                  </p>
                 </div>
+              )}
+            </div>
+
+            {/* ON-SCREEN PLACEMENT & DRAG TOOLBAR (Compact horizontal scroll on mobile, wrapped on desktop) */}
+            <div className="w-full max-w-full px-2 py-1 lg:px-3 lg:py-1.5 rounded-xl bg-[#131315] border border-white/15 flex items-center lg:flex-wrap justify-start lg:justify-center gap-1.5 lg:gap-2 text-[11px] shadow-lg overflow-x-auto no-scrollbar whitespace-nowrap shrink-0">
+              <button
+                type="button"
+                onClick={() =>
+                  handleUpdateStyleAndSyncPreset({
+                    canvasPositionLocked: !styleConfig.canvasPositionLocked,
+                  })
+                }
+                title={
+                  styleConfig.canvasPositionLocked
+                    ? 'Click to unlock on-screen dragging'
+                    : 'On-screen drag is active — drag captions anywhere on the video'
+                }
+                className={`px-2 py-0.5 rounded-lg text-[10px] font-bold uppercase tracking-wider flex items-center gap-1 cursor-pointer border transition-colors ${
+                  !styleConfig.canvasPositionLocked
+                    ? 'bg-[#163326] text-[#34D399] border-[#24B47E]/50'
+                    : 'bg-[#1C1B1E] text-amber-400 border-amber-500/40'
+                }`}
+              >
+                {styleConfig.canvasPositionLocked ? (
+                  <>
+                    <Lock className="w-3 h-3" />
+                    <span>Locked (Click to Move)</span>
+                  </>
+                ) : (
+                  <>
+                    <Unlock className="w-3 h-3" />
+                    <span>Move On Screen</span>
+                  </>
+                )}
+              </button>
+
+              {/* Scope Buttons: Stack | Lines | Words */}
+              <div className="flex items-center gap-1 bg-[#0B0B0D] p-0.5 rounded-lg border border-white/10">
+                {(
+                  [
+                    {
+                      id: 'stack',
+                      label: 'Stack',
+                      layer: 'all' as ActiveCanvasLayer,
+                      tip: 'Move the entire caption stack together anywhere on screen',
+                    },
+                    {
+                      id: 'lines',
+                      label: 'Lines',
+                      layer: 'small1' as ActiveCanvasLayer,
+                      tip: 'Move or resize individual caption lines',
+                    },
+                    {
+                      id: 'words',
+                      label: 'Words',
+                      layer: 'big' as ActiveCanvasLayer,
+                      tip: 'Move or resize the Hero / Emphasized word',
+                    },
+                  ] as const
+                ).map((sc) => {
+                  const activeScope =
+                    (styleConfig.unlockDragScope || 'stack') === sc.id;
+                  return (
+                    <button
+                      key={sc.id}
+                      type="button"
+                      onClick={() => {
+                        handleUpdateStyleAndSyncPreset({
+                          canvasPositionLocked: false,
+                          unlockDragScope: sc.id,
+                          selectedCanvasLayer: sc.layer,
+                          showOnScreenTransformBoxes: sc.id !== 'stack',
+                        });
+                        showToast(`Move Scope: ${sc.label} (${sc.tip})`);
+                      }}
+                      title={sc.tip}
+                      className={`px-2 py-0.5 rounded text-[10px] font-bold cursor-pointer transition-colors ${
+                        activeScope
+                          ? 'bg-[#24B47E] text-[#050505]'
+                          : 'text-[#8E9192] hover:text-white'
+                      }`}
+                    >
+                      {sc.label}
+                    </button>
+                  );
+                })}
               </div>
 
-              {/* SECTION 4.1 MINIMAL KALAKAR PREVIEW BAR (Replace | Safe zone | Res | Play | Mute | Time | Fullscreen | Lock) */}
-              <div className="w-full max-w-[680px] pt-2.5 flex flex-wrap items-center justify-between gap-2 text-xs text-zinc-300 shrink-0">
-                <input
-                  ref={replaceVideoInputRef}
-                  type="file"
-                  accept="video/*,audio/*"
-                  className="hidden"
-                  onChange={(e) => {
-                    const f = e.target.files?.[0];
-                    if (f) handleUploadFile(f, true);
-                    e.target.value = '';
-                  }}
-                />
-
-                {/* Left Group: Replace | Safe zone | Res */}
-                <div className="flex items-center gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() => replaceVideoInputRef.current?.click()}
-                    className="px-2.5 py-1.5 rounded-lg bg-[#18181E] hover:bg-[#22222A] border border-white/[0.07] text-zinc-200 text-[11px] font-medium cursor-pointer flex items-center gap-1.5"
-                    title="Swap the video file"
-                  >
-                    <RotateCcw className="w-3 h-3 text-zinc-400" />
-                    <span>Replace</span>
-                  </button>
-
-                  {/* Safe zone + Popover */}
-                  <div className="relative flex items-center bg-[#18181E] rounded-lg border border-white/[0.07]">
-                    <button
-                      type="button"
-                      onClick={() =>
-                        handleUpdateStyleAndSyncPreset({
-                          showSafeZones: !styleConfig.showSafeZones,
-                        })
-                      }
-                      className={`px-2.5 py-1.5 rounded-l-lg text-[11px] font-medium cursor-pointer flex items-center gap-1.5 ${
-                        styleConfig.showSafeZones
-                          ? 'text-[#34D399]'
-                          : 'text-zinc-300 hover:text-white'
-                      }`}
-                      title="Toggle Safe Zone & Alignment Crosshairs"
-                    >
-                      <Shield className="w-3 h-3" />
-                      <span>Safe zone</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setShowSafeZonePopover((v) => !v)}
-                      className="px-1.5 py-1.5 rounded-r-lg text-zinc-400 hover:text-white border-l border-white/[0.07] cursor-pointer"
-                      title="Safe zone settings"
-                    >
-                      <SlidersHorizontal className="w-3 h-3" />
-                    </button>
-
-                    {showSafeZonePopover && (
-                      <div className="absolute bottom-9 left-0 z-50 w-52 bg-[#18181F] border border-white/15 rounded-xl p-2.5 shadow-2xl space-y-2 text-left">
-                        <div className="flex items-center justify-between">
-                          <span className="text-[11px] font-bold text-white">
-                            Safe Zone Presets
-                          </span>
-                          <button
-                            type="button"
-                            onClick={() => setShowSafeZonePopover(false)}
-                            className="text-zinc-400 hover:text-white cursor-pointer"
-                          >
-                            <X className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                        {(
-                          [
-                            { id: 'instagram-reels', label: 'Instagram Reels' },
-                            { id: 'instagram-story', label: 'Instagram Story' },
-                            { id: 'instagram-feed', label: 'Instagram Feed' },
-                            { id: 'tiktok-foryou', label: 'TikTok For You' },
-                            { id: 'youtube-shorts', label: 'YouTube Shorts' },
-                          ] as { id: SafeZonePreset; label: string }[]
-                        ).map((p) => {
-                          const active =
-                            (styleConfig.safeZonePreset || 'instagram-reels') ===
-                            p.id;
-                          return (
-                            <button
-                              key={p.id}
-                              type="button"
-                              onClick={() =>
-                                handleUpdateStyleAndSyncPreset({
-                                  showSafeZones: true,
-                                  safeZonePreset: p.id,
-                                })
-                              }
-                              className={`w-full text-left px-2 py-1 rounded text-[11px] cursor-pointer flex items-center justify-between ${
-                                active
-                                  ? 'bg-[#152E23] text-[#34D399] font-semibold'
-                                  : 'text-zinc-300 hover:bg-white/5'
-                              }`}
-                            >
-                              <span>{p.label}</span>
-                              {active && <span>✓</span>}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const nextDepth = !styleConfig.captionDepthBehindSubject;
-                      const segInfo = getLatestSubjectSegmentation();
+              {/* Direct Horizontal (X%) & Vertical (Y%) Sliders right under the screen */}
+              <div className="flex items-center gap-2 bg-[#0B0B0D] px-2.5 py-0.5 rounded-lg border border-white/10">
+                <label className="flex items-center gap-1.5 text-[10px] text-zinc-300">
+                  <span className="text-[#8E9192] font-semibold">Horiz X</span>
+                  <input
+                    type="range"
+                    min={2}
+                    max={98}
+                    value={styleConfig.positionX ?? 50}
+                    onChange={(e) =>
                       handleUpdateStyleAndSyncPreset({
-                        captionDepthBehindSubject: nextDepth,
-                        ...(nextDepth
-                          ? {
-                              positionY: Math.round(
-                                (segInfo.recommendedBehindHeadYRatio || 0.31) * 100
-                              ),
-                            }
-                          : {}),
-                      });
-                      setSegments((prev) =>
-                        prev.map((s) => ({ ...s, behindSubject: nextDepth }))
-                      );
-                      showToast(
-                        nextDepth
-                          ? 'Placed caption behind subject (Depth Mask ON)'
-                          : 'Placed caption in front of subject (Depth Mask OFF)'
-                      );
-                    }}
-                    className={`px-2.5 py-1.5 rounded-lg border text-[11px] font-semibold cursor-pointer flex items-center gap-1.5 transition-colors ${
-                      styleConfig.captionDepthBehindSubject
-                        ? 'bg-[#152E23] border-[#2BAE66]/60 text-[#34D399]'
-                        : 'bg-[#18181E] hover:bg-[#22222A] border-white/[0.07] text-zinc-300 hover:text-white'
-                    }`}
-                    title="Auto AI Person Cutout: Place captions behind the speaker's head in the background"
-                  >
-                    <UserCheck className="w-3.5 h-3.5" />
-                    <span>
-                      {styleConfig.captionDepthBehindSubject
-                        ? 'Behind Head: ON'
-                        : 'Behind Head'}
-                    </span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const next = !styleConfig.lowResPreview;
-                      handleUpdateStyleAndSyncPreset({ lowResPreview: next });
-                      showToast(
-                        next
-                          ? 'Low Res Preview active (smooth scrubbing)'
-                          : 'HD Preview active'
-                      );
-                    }}
-                    className={`px-2.5 py-1.5 rounded-lg bg-[#18181E] hover:bg-[#22222A] border border-white/[0.07] text-[11px] font-medium cursor-pointer flex items-center gap-1 ${
-                      styleConfig.lowResPreview ? 'text-amber-300' : 'text-zinc-300'
-                    }`}
-                  >
-                    <span className="text-[9px] px-1 rounded bg-white/10 font-mono">
-                      HD
-                    </span>
-                    <span>Res</span>
-                  </button>
-                </div>
-
-                {/* Center Group: Play/Pause | Mute | Time Counter */}
-                <div className="flex items-center gap-3">
-                  <button
-                    type="button"
-                    onClick={togglePlayPause}
-                    className="p-1.5 rounded-lg text-white hover:bg-white/10 transition-colors cursor-pointer"
-                    aria-label={isPlaying ? 'Pause' : 'Play'}
-                  >
-                    {isPlaying ? (
-                      <Pause className="w-4 h-4 fill-white" />
-                    ) : (
-                      <Play className="w-4 h-4 fill-white" />
-                    )}
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setIsMuted((m) => !m)}
-                    className="p-1.5 rounded-lg text-zinc-300 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
-                    title="Mute / Unmute"
-                  >
-                    {isMuted ? (
-                      <VolumeX className="w-4 h-4 text-rose-400" />
-                    ) : (
-                      <Volume2 className="w-4 h-4" />
-                    )}
-                  </button>
-
-                  <span className="text-xs font-mono-tabular text-zinc-200">
-                    {Math.floor(currentTime / 60)}:
-                    {String(Math.floor(currentTime % 60)).padStart(2, '0')}{' '}
-                    <span className="text-zinc-500">
-                      / {Math.floor(duration / 60)}:
-                      {String(Math.floor(duration % 60)).padStart(2, '0')}
-                    </span>
+                        canvasPositionLocked: false,
+                        positionX: parseInt(e.target.value, 10),
+                      })
+                    }
+                    className="w-16 accent-[#24B47E] cursor-pointer"
+                  />
+                  <span className="font-mono text-white w-7 text-right">
+                    {styleConfig.positionX ?? 50}%
                   </span>
-                </div>
+                </label>
 
-                {/* Right Group: Fullscreen | Lock/Unlock */}
-                <div className="flex items-center gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (canvasWrapperRef.current?.requestFullscreen) {
-                        canvasWrapperRef.current
-                          .requestFullscreen()
-                          .catch(() => {});
-                      }
-                    }}
-                    className="p-1.5 rounded-lg bg-[#18181E] hover:bg-[#22222A] border border-white/[0.07] text-zinc-300 hover:text-white cursor-pointer"
-                    title="Fullscreen"
-                  >
-                    <Maximize2 className="w-3.5 h-3.5" />
-                  </button>
+                <span className="text-white/15">|</span>
 
+                <label className="flex items-center gap-1.5 text-[10px] text-zinc-300">
+                  <span className="text-[#8E9192] font-semibold">Vert Y</span>
+                  <input
+                    type="range"
+                    min={4}
+                    max={96}
+                    value={styleConfig.positionY ?? 66}
+                    onChange={(e) =>
+                      handleUpdateStyleAndSyncPreset({
+                        canvasPositionLocked: false,
+                        positionY: parseInt(e.target.value, 10),
+                      })
+                    }
+                    className="w-16 accent-[#24B47E] cursor-pointer"
+                  />
+                  <span className="font-mono text-white w-7 text-right">
+                    {styleConfig.positionY ?? 66}%
+                  </span>
+                </label>
+              </div>
+
+              {/* Quick Position Presets (Top / Center / Bottom) + Reset */}
+              <div className="flex items-center gap-1">
+                {(
+                  [
+                    { label: 'Top', x: 50, y: 18 },
+                    { label: 'Center', x: 50, y: 50 },
+                    { label: 'Bottom', x: 50, y: 74 },
+                  ] as const
+                ).map((p) => (
                   <button
+                    key={p.label}
                     type="button"
                     onClick={() =>
                       handleUpdateStyleAndSyncPreset({
-                        canvasPositionLocked: !styleConfig.canvasPositionLocked,
+                        canvasPositionLocked: false,
+                        positionX: p.x,
+                        positionY: p.y,
+                        smallOffsetX: 0,
+                        smallOffsetY: 0,
+                        smallLine2OffsetX: 0,
+                        smallLine2OffsetY: 0,
+                        bigOffsetX: 0,
+                        bigOffsetY: 0,
                       })
                     }
-                    className={`p-1.5 rounded-lg border cursor-pointer ${
-                      styleConfig.canvasPositionLocked
-                        ? 'bg-rose-500/15 border-rose-500/30 text-rose-300'
-                        : 'bg-[#18181E] hover:bg-[#22222A] border-white/[0.07] text-zinc-300 hover:text-white'
-                    }`}
-                    title={
-                      styleConfig.canvasPositionLocked
-                        ? 'Unlock to move lines or words'
-                        : 'Lock caption position'
-                    }
+                    className="px-2 py-0.5 rounded-lg bg-[#1C1B1E] hover:bg-[#24B47E] text-[#E5E1E4] hover:text-[#050505] text-[10px] font-semibold cursor-pointer"
                   >
-                    {styleConfig.canvasPositionLocked ? (
-                      <Lock className="w-3.5 h-3.5" />
-                    ) : (
-                      <Unlock className="w-3.5 h-3.5" />
-                    )}
+                    {p.label}
                   </button>
-                </div>
+                ))}
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    clearCachedVideoFrame();
+                    handleUpdateStyleAndSyncPreset({
+                      canvasPositionLocked: false,
+                      positionX: 50,
+                      positionY: 66,
+                      smallOffsetX: 0,
+                      smallOffsetY: 0,
+                      smallLine2OffsetX: 0,
+                      smallLine2OffsetY: 0,
+                      bigOffsetX: 0,
+                      bigOffsetY: 0,
+                      smallWordScale: 0.78,
+                      bigWordScale: 1.95,
+                      videoClipEdit: { ...DEFAULT_VIDEO_CLIP_EDIT },
+                    });
+                    showToast('Reset video crop, zoom, and caption positions to default!');
+                  }}
+                  title="Reset video crop, zoom, and caption positions back to full-frame defaults"
+                  className="px-2 py-0.5 rounded-lg bg-[#1C1B1E] hover:bg-rose-600 text-[#E5E1E4] hover:text-white text-[10px] font-semibold cursor-pointer"
+                >
+                  ↺ Reset
+                </button>
               </div>
-            </section>
+            </div>
           </div>
 
-          {/* BOTTOM DOCK: PREMIERE PRO MULTI-TRACK NLE TIMELINE (Separated Video 1 & Audio 1 Cutting, 2-Row Olive-Gold Captions, B-Roll 1, Video 2, Music/SFX) */}
-          <PremiereMultiTrackTimeline
-            segments={segments}
-            currentTime={currentTime}
-            duration={duration}
-            styleConfig={styleConfig}
-            timelineZoom={timelineZoom}
-            timelineGranularity={timelineGranularity}
-            audioWaveformBars={audioWaveformBars}
-            uploadedVideoUrl={uploadedVideoUrl}
-            uploadedVideoName={uploadedVideoName}
-            videoClips={videoClips}
-            audioClips={audioClips}
-            brollClips={brollClips}
-            video2Clips={video2Clips}
-            musicClips={musicClips}
-            tracksConfig={tracksConfig}
-            isVideoAudioLinked={isVideoAudioLinked}
-            onChangeZoom={setTimelineZoom}
-            onChangeGranularity={setTimelineGranularity}
-            onToggleVideoAudioLinked={() => {
-              setIsVideoAudioLinked((prev) => {
-                const next = !prev;
-                showToast(
-                  next
-                    ? 'Video 1 & Audio 1 LINKED: Razor cuts both tracks together'
-                    : 'Video 1 & Audio 1 SEPARATED: Cut Video & Audio independently!'
-                );
-                return next;
-              });
-            }}
-            onUpdateTracksConfig={setTracksConfig}
-            onUpdateVideoClips={setVideoClips}
-            onUpdateAudioClips={setAudioClips}
-            onUpdateBrollClips={setBrollClips}
-            onUpdateVideo2Clips={setVideo2Clips}
-            onUpdateMusicClips={setMusicClips}
-            onSeekTo={handleSeekTo}
-            onAddWordOrSegment={handleAddSegment}
-            onDeleteSegment={handleDeleteSegment}
-            onDeleteWordInSegment={handleDeleteWordInSegment}
-            onSplitSegmentAtTime={handleSplitSegment}
-            onMergeSegmentWithNext={handleMergeSegmentWithNext}
-            onNudgeSegmentTiming={handleNudgeSingleSegmentTiming}
-            onToggleBehindSubject={(segId) => {
-              const target = segments.find((s) => s.id === segId);
-              if (target) {
-                handleUpdateSegmentProps(segId, {
-                  behindSubject: !target.behindSubject,
-                });
-                showToast(
-                  !target.behindSubject
-                    ? 'Placed caption behind subject (Depth Mask ON)'
-                    : 'Placed caption in front of subject'
-                );
-              }
-            }}
-            onUpdateStyle={handleUpdateStyleAndSyncPreset}
-            onGenerateAiBroll={handleGenerateAiBrollTimelineClips}
-            onShowToast={showToast}
-          />
+          {/* BOTTOM FLOATING TRANSPORT BAR (Compact on Mobile, Full on Desktop) */}
+          <div className="w-full h-10 sm:h-11 lg:h-14 border-t border-white/[0.06] bg-[#131315]/95 backdrop-blur-md px-2 sm:px-3.5 lg:px-5 flex items-center justify-between gap-1.5 sm:gap-2 text-xs text-[#E5E1E4] shrink-0">
+            <input
+              ref={replaceVideoInputRef}
+              type="file"
+              accept="video/*,audio/*"
+              className="hidden"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) handleReplaceVideoPreserveCaptions(f);
+                e.target.value = '';
+              }}
+            />
+
+            {/* Left Group: Replace | Safe zone | Res */}
+            <div className="flex items-center gap-1 sm:gap-2">
+              <button
+                type="button"
+                onClick={() => replaceVideoInputRef.current?.click()}
+                className="flex items-center gap-1 sm:gap-1.5 px-2 sm:px-2.5 py-1 sm:py-1.5 rounded-lg bg-[#1C1B1E] hover:bg-[#2A2A2D] text-[#E5E1E4] text-[11px] sm:text-xs font-medium border border-white/[0.06] transition-colors cursor-pointer"
+                title="Replace Video (Preserves all your captions & timings when video duration matches)"
+              >
+                <RotateCcw className="w-3 h-3 sm:w-3.5 sm:h-3.5 text-[#8E9192]" />
+                <span className="hidden xs:inline">Replace</span>
+              </button>
+
+              {/* Safe zone + Safe Zone Frame Presets (Instagram Story, Instagram Reel, TikTok, YouTube Shorts, Instagram Feed) */}
+              <div className="relative flex items-center rounded-lg bg-[#1C1B1E] border border-white/[0.06]">
+                <button
+                  type="button"
+                  onClick={() =>
+                    handleUpdateStyleAndSyncPreset({
+                      showSafeZones: !styleConfig.showSafeZones,
+                      safeZonePreset: styleConfig.safeZonePreset || 'instagram-reels',
+                    })
+                  }
+                  className={`flex items-center gap-1 sm:gap-1.5 px-2 sm:px-2.5 py-1 sm:py-1.5 rounded-l-lg text-[11px] sm:text-xs font-medium cursor-pointer transition-colors border-r border-white/[0.06] ${
+                    styleConfig.showSafeZones
+                      ? 'bg-[#163326] text-[#34D399]'
+                      : 'text-[#E5E1E4] hover:bg-[#2A2A2D]'
+                  }`}
+                  title="Toggle Safe Zone & Platform Safe Zone Frame Overlay (Instagram Reels, Story, TikTok)"
+                >
+                  <Shield className="w-3 h-3 sm:w-3.5 sm:h-3.5 text-[#24B47E]" />
+                  <span className="hidden sm:inline">Safe zone</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowSafeZonePopover((v) => !v)}
+                  className="px-1 sm:px-1.5 py-1 sm:py-1.5 rounded-r-lg text-[#8E9192] hover:text-[#E5E1E4] hover:bg-[#2A2A2D] cursor-pointer"
+                  title="Choose Safe Zone Frame (Instagram Reels, Instagram Story, TikTok, Shorts)"
+                >
+                  <SlidersHorizontal className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
+                </button>
+
+                {showSafeZonePopover && (
+                  <div className="absolute bottom-11 left-0 z-50 w-60 bg-[#131315] border border-white/15 rounded-xl p-3 shadow-2xl space-y-2 text-left">
+                    <div className="flex items-center justify-between border-b border-white/10 pb-1.5">
+                      <div>
+                        <span className="text-[11px] font-bold text-white block">
+                          Safe Zones &amp; Safe Zone Frames
+                        </span>
+                        <span className="text-[9px] text-zinc-400">
+                          Select platform UI frame overlay
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setShowSafeZonePopover(false)}
+                        className="text-zinc-400 hover:text-white cursor-pointer"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                    {(
+                      [
+                        {
+                          id: 'instagram-reels',
+                          label: 'Instagram Reel',
+                          desc: 'Top bar + 5 right icons + bottom caption frame',
+                        },
+                        {
+                          id: 'instagram-story',
+                          label: 'Instagram Story',
+                          desc: 'Top story bars + avatar + bottom message pill',
+                        },
+                        {
+                          id: 'tiktok-foryou',
+                          label: 'TikTok',
+                          desc: 'For You header + 6 right icons + music ticker',
+                        },
+                        {
+                          id: 'youtube-shorts',
+                          label: 'YouTube Shorts',
+                          desc: 'Shorts header + 5 right icons + channel bar',
+                        },
+                        {
+                          id: 'instagram-feed',
+                          label: 'Instagram Feed',
+                          desc: 'Feed header + bottom interaction frame',
+                        },
+                      ] as { id: SafeZonePreset; label: string; desc: string }[]
+                    ).map((p) => {
+                      const active =
+                        (styleConfig.safeZonePreset || 'instagram-reels') ===
+                        p.id;
+                      return (
+                        <button
+                          key={p.id}
+                          type="button"
+                          onClick={() => {
+                            handleUpdateStyleAndSyncPreset({
+                              showSafeZones: true,
+                              safeZonePreset: p.id,
+                            });
+                            showToast(`Safe Zone Frame enabled: ${p.label}`);
+                          }}
+                          className={`w-full text-left px-2.5 py-1.5 rounded-lg text-[11px] cursor-pointer flex items-center justify-between transition-colors ${
+                            active && styleConfig.showSafeZones
+                              ? 'bg-[#24B47E]/20 border border-[#24B47E]/50 text-[#34D399] font-semibold'
+                              : 'text-zinc-300 hover:bg-white/5 border border-transparent'
+                          }`}
+                        >
+                          <div>
+                            <div className="font-semibold">{p.label}</div>
+                            <div className="text-[9px] text-zinc-400">{p.desc}</div>
+                          </div>
+                          {active && <span className="text-[#34D399] font-bold">✓</span>}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              <button
+                type="button"
+                onClick={() => {
+                  const next = !styleConfig.lowResPreview;
+                  handleUpdateStyleAndSyncPreset({ lowResPreview: next });
+                  showToast(
+                    next
+                      ? 'Low Res Preview active (smooth scrubbing)'
+                      : 'HD Preview active'
+                  );
+                }}
+                className={`px-2.5 py-1.5 rounded-lg bg-[#1C1B1E] hover:bg-[#2A2A2D] border border-white/[0.06] text-xs font-mono font-bold cursor-pointer flex items-center gap-1 ${
+                  styleConfig.lowResPreview ? 'text-amber-300' : 'text-[#8E9192] hover:text-[#E5E1E4]'
+                }`}
+              >
+                <span>HD</span>
+                <span className="font-sans font-normal text-[10px]">Res</span>
+              </button>
+            </div>
+
+            {/* Center Group: Play/Pause | Mute | Time Counter */}
+            <div className="flex items-center gap-4">
+              <button
+                type="button"
+                onClick={togglePlayPause}
+                className="w-9 h-9 rounded-full bg-[#E5E1E4] text-[#050505] flex items-center justify-center hover:scale-105 transition-transform shadow-md cursor-pointer"
+                aria-label={isPlaying ? 'Pause' : 'Play'}
+              >
+                {isPlaying ? (
+                  <Pause className="w-4 h-4 fill-[#050505]" />
+                ) : (
+                  <Play className="w-4 h-4 fill-[#050505] ml-0.5" />
+                )}
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setIsMuted((m) => !m)}
+                className="text-[#8E9192] hover:text-[#E5E1E4] transition-colors cursor-pointer"
+                title="Mute / Unmute"
+              >
+                {isMuted ? (
+                  <VolumeX className="w-4 h-4 text-rose-400" />
+                ) : (
+                  <Volume2 className="w-4 h-4" />
+                )}
+              </button>
+
+              <div className="font-mono text-xs tracking-wider">
+                <span className="text-[#E5E1E4] font-semibold">
+                  {Math.floor(currentTime / 60)}:
+                  {String(Math.floor(currentTime % 60)).padStart(2, '0')}
+                </span>
+                <span className="text-[#8E9192]">
+                  {' '}
+                  / {Math.floor(duration / 60)}:
+                  {String(Math.floor(duration % 60)).padStart(2, '0')}
+                </span>
+              </div>
+            </div>
+
+            {/* Right Group: Fullscreen | Lock/Unlock */}
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  if (canvasWrapperRef.current?.requestFullscreen) {
+                    canvasWrapperRef.current
+                      .requestFullscreen()
+                      .catch(() => {});
+                  }
+                }}
+                className="w-8 h-8 rounded-lg hover:bg-white/[0.06] flex items-center justify-center text-[#8E9192] hover:text-[#E5E1E4] transition-colors cursor-pointer"
+                title="Fullscreen"
+              >
+                <Maximize2 className="w-4 h-4" />
+              </button>
+
+              <button
+                type="button"
+                onClick={() =>
+                  handleUpdateStyleAndSyncPreset({
+                    canvasPositionLocked: !styleConfig.canvasPositionLocked,
+                  })
+                }
+                className={`w-8 h-8 rounded-lg border flex items-center justify-center transition-colors cursor-pointer ${
+                  styleConfig.canvasPositionLocked
+                    ? 'bg-[#1C1B1E] border-white/[0.06] text-[#8E9192] hover:text-[#E5E1E4]'
+                    : 'bg-[#24B47E]/15 border-[#24B47E]/40 text-[#24B47E]'
+                }`}
+                title={
+                  styleConfig.canvasPositionLocked
+                    ? 'Unlock to move lines or words'
+                    : 'Lock caption position'
+                }
+              >
+                {styleConfig.canvasPositionLocked ? (
+                  <Lock className="w-4 h-4" />
+                ) : (
+                  <Unlock className="w-4 h-4" />
+                )}
+              </button>
+            </div>
+          </div>
+        </section>
+
+        {/* MOBILE WORKSPACE SWITCHER BAR (Visible on < lg right between the Top Video Player and the Bottom Active Panel) */}
+        <div className="order-2 lg:hidden w-full bg-[#16161A] border-y border-white/[0.08] px-2 py-1.5 flex items-center justify-between gap-1 shrink-0 z-30 overflow-x-auto no-scrollbar">
+          {(
+            [
+              {
+                id: 'edit',
+                label: '✨ Edit & Style',
+                tip: 'Show Video on top + Templates, Text, Colors, Transitions & Edit panel below',
+              },
+              {
+                id: 'captions',
+                label: `💬 Captions (${segments.length})`,
+                tip: 'Show Video on top + Captions & Languages panel below',
+              },
+              {
+                id: 'timeline',
+                label: '🎞️ Timeline',
+                tip: 'Show Video on top + Multi-Track Timeline below',
+              },
+              {
+                id: 'all',
+                label: '↕️ Scroll All',
+                tip: 'Stack Video + Editing Panel + Captions + Timeline in one scrollable view',
+              },
+              {
+                id: 'video',
+                label: '📺 Full Video',
+                tip: 'Expand Video Player & On-Screen X/Y Drag Controls to full screen height',
+              },
+            ] as const
+          ).map((tab) => {
+            const active = mobileWorkspaceTab === tab.id;
+            return (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => {
+                  setMobileWorkspaceTab(tab.id);
+                  if (
+                    tab.id === 'captions' ||
+                    tab.id === 'timeline' ||
+                    tab.id === 'all'
+                  ) {
+                    setIsLeftColumnCollapsed(false);
+                  }
+                }}
+                title={tab.tip}
+                className={`flex-1 min-w-fit px-2.5 py-1.5 rounded-lg text-[11px] font-bold transition-all cursor-pointer whitespace-nowrap text-center ${
+                  active
+                    ? 'bg-[#24B47E] text-[#050505] shadow-[0_0_12px_rgba(36,180,126,0.3)]'
+                    : 'bg-[#1C1C21] text-zinc-300 hover:text-white border border-white/[0.06]'
+                }`}
+              >
+                {tab.label}
+              </button>
+            );
+          })}
         </div>
 
         {/* RIGHT COLUMN: Kalakar Right Panel (Captions vs Edit top tabs, Collapse arrow, Templates/Text/Transitions/AI Audio) */}
         <StyleAnimationInspector
+          mobileVisible={
+            mobileWorkspaceTab === 'edit' || mobileWorkspaceTab === 'all'
+          }
           styleConfig={styleConfig}
           presets={presets}
           customFonts={customFonts}
@@ -3801,14 +5286,60 @@ export default function App() {
           onExportAudioWAV={() => handleExportAudioWAV(false)}
           onExportAlphaOverlay={handleExportAlphaOverlay}
           onExportPremiereXML={handleExportPremiereXML}
+          onExportPremiereNativeXML={handleExportPremiereNativeXML}
+          onExportDaVinciFCPXML={handleExportDaVinciFCPXML}
+          onExportDaVinciEDL={handleExportDaVinciEDL}
           onExportBurnedVideo={handleExportBurnedVideo}
           onStopExportNow={handleStopExportAndSaveNow}
           exportFormat={exportFormat}
           onChangeExportFormat={setExportFormat}
+          exportResolution={exportResolution}
+          onChangeExportResolution={setExportResolution}
           isExportingVideo={isExportingVideo}
           exportProgress={exportProgress}
+          segments={segments}
+          aiBRollSlots={aiBRollSlots}
+          isAnalyzingBRollScript={isAnalyzingBRollScript}
+          onUpdateBRollSlot={handleUpdateBRollSlot}
+          onAnalyzeAndGenerateAllThreeBRolls={handleAnalyzeAndGenerateAllThreeBRolls}
+          onRegenerateSingleBRollSlotImage={handleRegenerateSingleBRollSlotImage}
+          onSeekTo={handleSeekTo}
+          activeLineStylingSegmentId={activeLineStylingSegmentId}
+          onCloseLineStyling={() => setActiveLineStylingSegmentId(null)}
+          onUpdateSegmentMeta={handleUpdateSegmentProps}
         />
       </main>
+      )}
+
+      {/* EXPORT STUDIO DRAWER (720p / 1080p / 4K Video + .SRT + Premiere Pro + DaVinci Resolve) */}
+      <ExportStudioDrawer
+        isOpen={isExportDrawerOpen}
+        onClose={() => setIsExportDrawerOpen(false)}
+        exportType={exportType}
+        onChangeExportType={setExportType}
+        exportResolution={exportResolution}
+        onChangeExportResolution={setExportResolution}
+        exportFormat={exportFormat}
+        onChangeExportFormat={setExportFormat}
+        exportFps={exportFps}
+        onChangeExportFps={setExportFps}
+        aspectRatio={styleConfig.aspectRatio || '9:16'}
+        primaryTrackLabel={primaryMeta.label}
+        isExportingVideo={isExportingVideo}
+        exportProgress={exportProgress}
+        onTriggerPrimaryRender={handleTriggerPrimaryExport}
+        onStopExportNow={handleStopExportAndSaveNow}
+        onExportBurnedVideo={handleExportBurnedVideo}
+        onExportSRT={handleExportSRT}
+        onExportVTT={handleExportVTT}
+        onExportJSON={handleExportJSON}
+        onExportPremiereXML={handleExportPremiereNativeXML}
+        onExportPremiereFCPXML={handleExportPremiereXML}
+        onExportDaVinciFCPXML={handleExportDaVinciFCPXML}
+        onExportDaVinciEDL={handleExportDaVinciEDL}
+        onExportAlphaOverlay={handleExportAlphaOverlay}
+        onExportAudioWAV={() => handleExportAudioWAV(false)}
+      />
 
       {/* CAMERA RECORDING MODAL */}
       {isCameraModalOpen && (
@@ -3869,6 +5400,26 @@ export default function App() {
         activeSampleTitle={activeSampleReel.title}
         userPlan={userPlan}
         audioCleansRemaining={audioEnhancer.remainingCredits ?? 3}
+        autoEmojis={styleConfig.removeEmojis === false}
+        onChangeAutoEmojis={(enabled) => {
+          handleApplyCaptionToolAction(enabled ? 'auto-add-emojis' : 'remove-emojis');
+        }}
+        audioEnhancement={Boolean(audioEnhancer.enabled)}
+        onChangeAudioEnhancement={(enabled) => {
+          setAudioEnhancer((prev) => ({ ...prev, enabled }));
+        }}
+        autoHeroNLP={Boolean(autoHeroNLP && !styleConfig.removeEmphasis)}
+        onChangeAutoHeroNLP={(enabled) => {
+          setAutoHeroNLP(enabled);
+          handleApplyCaptionToolAction(enabled ? 'restore-emphasis' : 'remove-emphasis');
+        }}
+        removePunctuation={Boolean(styleConfig.removePunctuation)}
+        onChangeRemovePunctuation={(enabled) => {
+          handleApplyCaptionToolAction(
+            enabled ? 'remove-punctuation' : 'restore-punctuation'
+          );
+        }}
+        onUploadNewFile={(file) => handleUploadFile(file, true)}
         onClose={() => setIsPrepareMediaOpen(false)}
         onUpgradePlan={() => {
           setIsPrepareMediaOpen(false);
@@ -3880,55 +5431,57 @@ export default function App() {
           writingSystem,
           audioEnhancement,
           autoEmojis,
+          autoHeroNLP: modalAutoHeroNLP,
+          removePunctuation: modalRemovePunctuation,
           mappedTrack,
         }) => {
           setIsPrepareMediaOpen(false);
           setDetectedLanguage(`${spokenLanguage} (${writingSystem} Script)`);
+          setSourceLanguageHint(`${spokenLanguage} (${writingSystem} script)`);
           handleSelectPrimaryTrack(mappedTrack);
 
-          if (audioEnhancement && !audioEnhancer.enabled) {
-            setAudioEnhancer((prev) => ({
-              ...prev,
-              enabled: true,
-              remainingCredits: Math.max(0, (prev.remainingCredits ?? 3) - 1),
-            }));
-          }
+          setStyleConfig((prev) => ({
+            ...prev,
+            removeEmojis: !autoEmojis,
+            removePunctuation: modalRemovePunctuation,
+            removeEmphasis: !modalAutoHeroNLP,
+          }));
+          setAutoHeroNLP(modalAutoHeroNLP);
+          setAudioEnhancer((prev) => ({
+            ...prev,
+            enabled: audioEnhancement,
+            remainingCredits:
+              audioEnhancement && !prev.enabled
+                ? Math.max(0, (prev.remainingCredits ?? 3) - 1)
+                : prev.remainingCredits,
+          }));
 
           if (uploadedVideoFile) {
             setSegments([]);
-            runFastCaptionPipeline(
-              uploadedVideoFile,
-              `${spokenLanguage} (${writingSystem} script)`
-            );
+            runFastCaptionPipeline(uploadedVideoFile, {
+              hintOverride: `${spokenLanguage} (${writingSystem} script)`,
+              autoEmojisOverride: autoEmojis,
+              removePunctuationOverride: modalRemovePunctuation,
+              autoHeroNLPOverride: modalAutoHeroNLP,
+              audioEnhancementOverride: audioEnhancement,
+            });
           } else {
             if (autoEmojis) {
-              setSegments((prev) =>
-                prev.map((seg) => {
-                  const t = seg.tracks[mappedTrack] || seg.tracks.tinglish;
-                  if (!t) return seg;
-                  const withEmojis = injectEmojisIntoCaptionText(t.text);
-                  const words = buildWordTimingsClient(
-                    withEmojis,
-                    seg.startTime,
-                    seg.endTime,
-                    t.words
-                  );
-                  return {
-                    ...seg,
-                    tracks: {
-                      ...seg.tracks,
-                      [mappedTrack]: {
-                        text: withEmojis,
-                        words,
-                      },
-                    },
-                  };
-                })
-              );
+              handleApplyCaptionToolAction('auto-add-emojis');
+            } else {
+              handleApplyCaptionToolAction('remove-emojis');
+            }
+            if (modalRemovePunctuation) {
+              handleApplyCaptionToolAction('remove-punctuation');
+            }
+            if (!modalAutoHeroNLP) {
+              handleApplyCaptionToolAction('remove-emphasis');
+            } else {
+              handleApplyCaptionToolAction('restore-emphasis');
             }
             showToast(
-              `Prepared media in ${spokenLanguage} (${writingSystem} script)${
-                autoEmojis ? ' + Auto Emojis 💰💵👥' : ''
+              `Prepared media in ${spokenLanguage} (${writingSystem} script) · Emojis ${
+                autoEmojis ? 'ON' : 'OFF'
               }!`
             );
           }
@@ -3985,6 +5538,17 @@ export default function App() {
           }
         }}
         onReplaceSegments={setSegments}
+        onShowToast={showToast}
+      />
+
+      {/* INTERACTIVE GOOGLE CLOUD & GOOGLE TTS COST ESTIMATOR MODAL (USD $ & INR ₹) */}
+      <CloudCostEstimatorModal
+        isOpen={isCostEstimatorOpen}
+        onClose={() => setIsCostEstimatorOpen(false)}
+        activeVideoDurationSec={duration}
+        activeVideoName={uploadedVideoName || activeSampleReel.title}
+        segments={segments}
+        primaryTrack={styleConfig.primaryTrack}
         onShowToast={showToast}
       />
     </div>
