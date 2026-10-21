@@ -121,6 +121,7 @@ interface StyleAnimationInspectorProps {
     segmentId: string,
     partial: Partial<CaptionSegment>
   ) => void;
+  onOpenFrameStyleCloner?: () => void;
 }
 
 const ANIMATION_ENGINES: {
@@ -333,6 +334,7 @@ export const StyleAnimationInspector: React.FC<StyleAnimationInspectorProps> = (
   activeLineStylingSegmentId = null,
   onCloseLineStyling,
   onUpdateSegmentMeta,
+  onOpenFrameStyleCloner,
 }) => {
   // Section 4: Collapse arrow on the panel edge hides or shows the right panel
   const [isRightPanelCollapsed, setIsRightPanelCollapsed] = useState(false);
@@ -699,6 +701,7 @@ export const StyleAnimationInspector: React.FC<StyleAnimationInspectorProps> = (
             onUpdateStyle={onUpdateStyle}
             onCreateNewPreset={onCreateNewPreset}
             onUpgradePlan={onUpgradePlan}
+            onOpenFrameStyleCloner={onOpenFrameStyleCloner}
           />
         )}
 
@@ -707,6 +710,7 @@ export const StyleAnimationInspector: React.FC<StyleAnimationInspectorProps> = (
             styleConfig={styleConfig}
             customFonts={customFonts}
             onUpdateStyle={onUpdateStyle}
+            onOpenFrameStyleCloner={onOpenFrameStyleCloner}
           />
         )}
 

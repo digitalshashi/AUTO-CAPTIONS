@@ -53,6 +53,7 @@ interface KalakarTemplatesTabProps {
   onUpdateStyle: (partial: Partial<CaptionStyleConfig>) => void;
   onCreateNewPreset: (name: string, badgeText: string) => void;
   onUpgradePlan?: () => void;
+  onOpenFrameStyleCloner?: () => void;
 }
 
 const VerifiedCreatorBadge: React.FC = () => (
@@ -1223,6 +1224,7 @@ export const KalakarTemplatesTab: React.FC<KalakarTemplatesTabProps> = ({
   onUpdateStyle,
   onCreateNewPreset,
   onUpgradePlan,
+  onOpenFrameStyleCloner,
 }) => {
   const [subTab, setSubTab] = useState<'builtin' | 'mypresets'>('builtin');
   const [searchQuery, setSearchQuery] = useState('');
@@ -1263,6 +1265,32 @@ export const KalakarTemplatesTab: React.FC<KalakarTemplatesTabProps> = ({
 
   return (
     <div className="space-y-3 text-xs">
+      {/* AI Copy Frame / Poster Style Banner */}
+      {onOpenFrameStyleCloner && (
+        <button
+          type="button"
+          onClick={onOpenFrameStyleCloner}
+          className="w-full p-2.5 rounded-xl bg-gradient-to-r from-[#10B981]/15 via-[#181822] to-[#06B6D4]/15 hover:from-[#10B981]/25 hover:to-[#06B6D4]/25 border border-[#10B981]/40 flex items-center justify-between gap-2 text-left cursor-pointer transition-all shadow-sm"
+        >
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="w-7 h-7 rounded-lg bg-[#10B981] text-[#041E15] flex items-center justify-center shrink-0">
+              <Sparkles className="w-3.5 h-3.5" />
+            </span>
+            <div className="min-w-0">
+              <div className="text-[11px] font-extrabold text-white truncate">
+                Copy Style from Frame / Poster
+              </div>
+              <div className="text-[10px] text-zinc-400 truncate">
+                Select text, logo mark, or color area to create a style
+              </div>
+            </div>
+          </div>
+          <span className="px-2 py-1 rounded-lg bg-[#10B981] text-[#041E15] text-[10px] font-bold whitespace-nowrap shrink-0">
+            Clone AI
+          </span>
+        </button>
+      )}
+
       {/* Top Row: "Templates" | "My Presets" + "+ Save preset" button (Exact match to captions.png) */}
       <div className="flex items-center justify-between gap-2">
         <div className="inline-flex items-center bg-[#18181F] p-1 rounded-xl border border-white/[0.07]">
@@ -1858,6 +1886,7 @@ interface KalakarEffectsSectionProps {
   styleConfig: CaptionStyleConfig;
   customFonts: string[];
   onUpdateStyle: (partial: Partial<CaptionStyleConfig>) => void;
+  onOpenFrameStyleCloner?: () => void;
 }
 
 interface MultiStopGradientBarProps {
@@ -2277,6 +2306,7 @@ export const KalakarTextAndEffectsTab: React.FC<KalakarEffectsSectionProps> = ({
   styleConfig,
   customFonts,
   onUpdateStyle,
+  onOpenFrameStyleCloner,
 }) => {
   const [fontSearch, setFontSearch] = useState('');
   const [selectedFontGroup, setSelectedFontGroup] =
@@ -2367,6 +2397,32 @@ export const KalakarTextAndEffectsTab: React.FC<KalakarEffectsSectionProps> = ({
 
   return (
     <div className="space-y-4 text-xs text-[#E5E1E4] pb-4">
+      {/* AI Copy Style from Video Frame / Poster Quick Action */}
+      {onOpenFrameStyleCloner && (
+        <button
+          type="button"
+          onClick={onOpenFrameStyleCloner}
+          className="w-full p-2.5 rounded-xl bg-[#18191E] hover:bg-[#20222A] border border-[#10B981]/40 flex items-center justify-between gap-2 text-left cursor-pointer transition-colors"
+        >
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="w-6 h-6 rounded-lg bg-[#10B981]/20 border border-[#10B981]/50 text-[#34D399] flex items-center justify-center shrink-0">
+              <Sparkles className="w-3.5 h-3.5" />
+            </span>
+            <div className="min-w-0">
+              <div className="text-[11px] font-bold text-white truncate">
+                Copy Style from Frame / Poster
+              </div>
+              <div className="text-[10px] text-[#8E9192] truncate">
+                Sample text, logo mark, or colors from any frame
+              </div>
+            </div>
+          </div>
+          <span className="px-2 py-1 rounded-lg bg-[#10B981] text-[#041E15] text-[10px] font-bold whitespace-nowrap shrink-0">
+            Sample Frame
+          </span>
+        </button>
+      )}
+
       {/* 1. FONTS COLLAPSIBLE SECTION (Screenshots 1 & 2) */}
       <div className="border-b border-white/[0.07] pb-3.5">
         <div className="flex items-center justify-between mb-2.5">
@@ -2491,6 +2547,241 @@ export const KalakarTextAndEffectsTab: React.FC<KalakarEffectsSectionProps> = ({
                   />
                   <span className="text-[11px] text-[#8E9192] ml-1">px</span>
                 </div>
+              </div>
+            </div>
+
+            {/* Caption Line Count (1 Line / 2 Lines / 3 Lines) & Per-Line Size + Bold / Italic / Shine / Color */}
+            <div className="p-2.5 rounded-xl bg-[#141519] border border-white/[0.08] space-y-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[11px] font-bold text-white">
+                  Caption Lines
+                </span>
+                <div className="grid grid-cols-4 gap-1 bg-[#0E0F12] p-0.5 rounded-lg border border-white/[0.08]">
+                  {(
+                    [
+                      { val: undefined, label: 'Auto' },
+                      { val: 1 as const, label: '1 Line' },
+                      { val: 2 as const, label: '2 Lines' },
+                      { val: 3 as const, label: '3 Lines' },
+                    ] as const
+                  ).map((opt) => {
+                    const isSelected = styleConfig.maxLines === opt.val;
+                    return (
+                      <button
+                        key={`maxlines-${String(opt.val)}`}
+                        type="button"
+                        onClick={() =>
+                          onUpdateStyle({
+                            maxLines: opt.val,
+                            smallTwoLineMode:
+                              opt.val === 3 ? 'two-line-split' : 'single-line',
+                          })
+                        }
+                        className={`px-2 py-1 rounded-md text-[10px] font-bold transition-colors cursor-pointer ${
+                          isSelected
+                            ? 'bg-[#20B038] text-white shadow-sm'
+                            : 'text-[#8E9192] hover:text-white'
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Per-Line Size (- / +) & Style (Bold, Italic, Shine, Color) */}
+              <div className="space-y-1.5 pt-1 border-t border-white/[0.06]">
+                {(
+                  [
+                    {
+                      lineNum: 1,
+                      label: 'Line 1 (Top)',
+                      sizePx:
+                        styleConfig.line1FontSizePx ??
+                        Math.round(
+                          (styleConfig.fontSize || 48) *
+                            (styleConfig.smallWordScale || 0.78)
+                        ),
+                      bold: Boolean(styleConfig.line1Bold),
+                      italic: Boolean(styleConfig.line1Italic),
+                      shine: Boolean(styleConfig.line1Shine),
+                      color:
+                        styleConfig.line1Color ||
+                        styleConfig.primaryColor ||
+                        '#FFFFFF',
+                      onSize: (nextPx: number) =>
+                        onUpdateStyle({
+                          line1FontSizePx: Math.max(14, Math.min(130, nextPx)),
+                        }),
+                      onToggleBold: () =>
+                        onUpdateStyle({ line1Bold: !styleConfig.line1Bold }),
+                      onToggleItalic: () =>
+                        onUpdateStyle({
+                          line1Italic: !styleConfig.line1Italic,
+                        }),
+                      onToggleShine: () =>
+                        onUpdateStyle({ line1Shine: !styleConfig.line1Shine }),
+                      onColor: (c: string) =>
+                        onUpdateStyle({ line1Color: c }),
+                    },
+                    {
+                      lineNum: 2,
+                      label: 'Line 2 (Hero)',
+                      sizePx:
+                        styleConfig.line2FontSizePx ??
+                        Math.round(
+                          (styleConfig.fontSize || 48) *
+                            (styleConfig.bigWordScale || 1.75)
+                        ),
+                      bold: Boolean(styleConfig.line2Bold ?? true),
+                      italic: Boolean(styleConfig.line2Italic),
+                      shine: Boolean(styleConfig.line2Shine),
+                      color:
+                        styleConfig.line2Color ||
+                        styleConfig.highlightColor ||
+                        '#20B038',
+                      onSize: (nextPx: number) =>
+                        onUpdateStyle({
+                          line2FontSizePx: Math.max(16, Math.min(150, nextPx)),
+                        }),
+                      onToggleBold: () =>
+                        onUpdateStyle({
+                          line2Bold: !(styleConfig.line2Bold ?? true),
+                        }),
+                      onToggleItalic: () =>
+                        onUpdateStyle({
+                          line2Italic: !styleConfig.line2Italic,
+                        }),
+                      onToggleShine: () =>
+                        onUpdateStyle({ line2Shine: !styleConfig.line2Shine }),
+                      onColor: (c: string) =>
+                        onUpdateStyle({ line2Color: c }),
+                    },
+                    ...(styleConfig.maxLines === 3
+                      ? [
+                          {
+                            lineNum: 3,
+                            label: 'Line 3 (Bottom)',
+                            sizePx:
+                              styleConfig.line3FontSizePx ??
+                              styleConfig.line1FontSizePx ??
+                              Math.round(
+                                (styleConfig.fontSize || 48) *
+                                  (styleConfig.smallWordScale || 0.78)
+                              ),
+                            bold: Boolean(styleConfig.line3Bold),
+                            italic: Boolean(styleConfig.line3Italic),
+                            shine: Boolean(styleConfig.line3Shine),
+                            color:
+                              styleConfig.line3Color ||
+                              styleConfig.primaryColor ||
+                              '#FFFFFF',
+                            onSize: (nextPx: number) =>
+                              onUpdateStyle({
+                                line3FontSizePx: Math.max(
+                                  14,
+                                  Math.min(130, nextPx)
+                                ),
+                              }),
+                            onToggleBold: () =>
+                              onUpdateStyle({
+                                line3Bold: !styleConfig.line3Bold,
+                              }),
+                            onToggleItalic: () =>
+                              onUpdateStyle({
+                                line3Italic: !styleConfig.line3Italic,
+                              }),
+                            onToggleShine: () =>
+                              onUpdateStyle({
+                                line3Shine: !styleConfig.line3Shine,
+                              }),
+                            onColor: (c: string) =>
+                              onUpdateStyle({ line3Color: c }),
+                          },
+                        ]
+                      : []),
+                  ]
+                ).map((ln) => (
+                  <div
+                    key={`global-line-ctrl-${ln.lineNum}`}
+                    className="flex items-center justify-between gap-1.5 bg-[#18191E] px-2 py-1.5 rounded-lg border border-white/[0.06]"
+                  >
+                    <span className="text-[10px] font-semibold text-zinc-200 truncate w-20 shrink-0">
+                      {ln.label}
+                    </span>
+
+                    {/* Decrease / Increase Line Font Size */}
+                    <div className="flex items-center gap-1 bg-[#111216] px-1.5 py-0.5 rounded-md border border-white/[0.08]">
+                      <button
+                        type="button"
+                        onClick={() => ln.onSize(ln.sizePx - 2)}
+                        title={`Decrease ${ln.label} size`}
+                        className="w-4 h-4 rounded hover:bg-white/10 text-zinc-300 hover:text-white font-bold text-xs flex items-center justify-center cursor-pointer"
+                      >
+                        -
+                      </button>
+                      <span className="text-[10px] font-mono font-bold text-white w-8 text-center">
+                        {ln.sizePx}p
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => ln.onSize(ln.sizePx + 2)}
+                        title={`Increase ${ln.label} size`}
+                        className="w-4 h-4 rounded hover:bg-white/10 text-zinc-300 hover:text-white font-bold text-xs flex items-center justify-center cursor-pointer"
+                      >
+                        +
+                      </button>
+                    </div>
+
+                    {/* Line Bold / Italic / Shine / Color */}
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={ln.onToggleBold}
+                        title={`Toggle Bold on ${ln.label}`}
+                        className={`w-6 h-6 rounded text-[10px] font-black transition-colors cursor-pointer border ${
+                          ln.bold
+                            ? 'bg-[#20B038] text-white border-[#20B038]'
+                            : 'bg-[#111216] text-zinc-400 border-white/[0.08] hover:text-white'
+                        }`}
+                      >
+                        B
+                      </button>
+                      <button
+                        type="button"
+                        onClick={ln.onToggleItalic}
+                        title={`Toggle Italic on ${ln.label}`}
+                        className={`w-6 h-6 rounded text-[10px] italic font-serif font-bold transition-colors cursor-pointer border ${
+                          ln.italic
+                            ? 'bg-[#20B038] text-white border-[#20B038]'
+                            : 'bg-[#111216] text-zinc-400 border-white/[0.08] hover:text-white'
+                        }`}
+                      >
+                        I
+                      </button>
+                      <button
+                        type="button"
+                        onClick={ln.onToggleShine}
+                        title={`Toggle Metallic Shine Shimmer on ${ln.label}`}
+                        className={`px-1.5 h-6 rounded text-[9px] font-bold transition-colors cursor-pointer border flex items-center gap-0.5 ${
+                          ln.shine
+                            ? 'bg-amber-400 text-zinc-950 border-amber-300 shadow-sm'
+                            : 'bg-[#111216] text-zinc-400 border-white/[0.08] hover:text-amber-300'
+                        }`}
+                      >
+                        <span>✨</span>
+                      </button>
+                      <input
+                        type="color"
+                        value={ln.color}
+                        onChange={(e) => ln.onColor(e.target.value)}
+                        title={`${ln.label} Color`}
+                        className="w-5 h-5 rounded cursor-pointer bg-transparent border border-white/15 p-0"
+                      />
+                    </div>
+                  </div>
+                ))}
               </div>
             </div>
 
@@ -2789,50 +3080,6 @@ export const KalakarTextAndEffectsTab: React.FC<KalakarEffectsSectionProps> = ({
                 </div>
               </div>
             </div>
-
-            <button
-              type="button"
-              onClick={() => setShowAdvancedPosition((v) => !v)}
-              className="text-[10px] text-[#8E9192] hover:text-white flex items-center gap-1 cursor-pointer"
-            >
-              <span>
-                {showAdvancedPosition
-                  ? 'Hide 9-Point Grid & Line Offsets'
-                  : '9-Point Quick Grid & Line Offsets'}
-              </span>
-            </button>
-
-            {showAdvancedPosition && (
-              <div className="grid grid-cols-3 gap-1 bg-[#141417] p-1.5 rounded-lg border border-white/[0.06]">
-                {(
-                  [
-                    { label: '↖ Top L', x: 24, y: 18 },
-                    { label: '↑ Top', x: 50, y: 18 },
-                    { label: '↗ Top R', x: 76, y: 18 },
-                    { label: '← Mid L', x: 24, y: 50 },
-                    { label: '• Center', x: 50, y: 50 },
-                    { label: '→ Mid R', x: 76, y: 50 },
-                    { label: '↙ Bot L', x: 24, y: 80 },
-                    { label: '↓ Bot', x: 50, y: 80 },
-                    { label: '↘ Bot R', x: 76, y: 80 },
-                  ] as const
-                ).map((pt) => (
-                  <button
-                    key={pt.label}
-                    type="button"
-                    onClick={() =>
-                      onUpdateStyle({
-                        positionX: pt.x,
-                        positionY: pt.y,
-                      })
-                    }
-                    className="py-1 rounded bg-[#18191C] hover:bg-[#24262B] text-[10px] text-zinc-300 cursor-pointer"
-                  >
-                    {pt.label}
-                  </button>
-                ))}
-              </div>
-            )}
           </div>
         )}
       </div>
@@ -3610,10 +3857,12 @@ export const KalakarTextAndEffectsTab: React.FC<KalakarEffectsSectionProps> = ({
               )}
             </div>
 
-            {/* Arc */}
+            {/* Arc / Text Curve (-360° to +360°: 180° Half Circle, 360° Full Circle, Reversed) */}
             <div className="space-y-2">
               <div className="flex items-center justify-between py-0.5">
-                <span className="text-xs text-[#9FA1A6]">Arc</span>
+                <span className="text-xs text-[#9FA1A6]">
+                  Arc / Text Curve (⌒)
+                </span>
                 <button
                   type="button"
                   role="switch"
@@ -3622,7 +3871,7 @@ export const KalakarTextAndEffectsTab: React.FC<KalakarEffectsSectionProps> = ({
                     onUpdateStyle({
                       arcEnabled: !styleConfig.arcEnabled,
                       arcCurveDeg: !styleConfig.arcEnabled
-                        ? styleConfig.arcCurveDeg || 24
+                        ? styleConfig.arcCurveDeg || 180
                         : 0,
                     })
                   }
@@ -3640,54 +3889,104 @@ export const KalakarTextAndEffectsTab: React.FC<KalakarEffectsSectionProps> = ({
                 </button>
               </div>
               {styleConfig.arcEnabled && (
-                <div className="space-y-2 p-2 rounded-lg bg-[#16171A] border border-white/[0.06] text-[10px]">
+                <div className="space-y-2.5 p-2.5 rounded-lg bg-[#16171A] border border-white/[0.06] text-[10px]">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[#8E9192] font-semibold">
+                      Direction:{' '}
+                      <span className="text-white">
+                        {(styleConfig.arcCurveDeg ?? 180) >= 0
+                          ? 'Upward Arch'
+                          : 'Reversed Valley'}
+                      </span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const cur = styleConfig.arcCurveDeg || 180;
+                        const flipped = -cur;
+                        onUpdateStyle({
+                          arcCurveDeg: flipped,
+                          arcShape: flipped < 0 ? 'valley' : 'arch',
+                        });
+                      }}
+                      className="px-2 py-1 rounded bg-[#20B038]/15 hover:bg-[#20B038] text-[#34D399] hover:text-white font-bold border border-[#20B038]/40 transition-colors cursor-pointer"
+                    >
+                      ⇄ Reverse Curve
+                    </button>
+                  </div>
+
+                  {/* Quick Angle Presets (45°, 90°, 180°, 360° & Reversed -180°, -360°) */}
                   <div className="grid grid-cols-3 gap-1">
                     {(
                       [
-                        'arch',
-                        'valley',
-                        'globe',
-                        'dome',
-                        'sphere',
-                        'curve',
+                        { deg: 45, label: '+45° Arch', shape: 'arch' },
+                        { deg: 180, label: '180° Arch', shape: 'arch' },
+                        { deg: 360, label: '360° Circle', shape: 'globe' },
+                        { deg: -45, label: '-45° Rev', shape: 'valley' },
+                        { deg: -180, label: '-180° Rev', shape: 'valley' },
+                        { deg: -360, label: '-360° Rev', shape: 'sphere' },
                       ] as const
-                    ).map((sh) => (
+                    ).map((preset) => (
                       <button
-                        key={sh}
+                        key={`global-arc-${preset.deg}`}
                         type="button"
                         onClick={() =>
                           onUpdateStyle({
-                            arcShape: sh,
-                            arcCurveDeg: sh === 'valley' ? -24 : 24,
+                            arcEnabled: true,
+                            arcShape: preset.shape,
+                            arcCurveDeg: preset.deg,
                           })
                         }
-                        className={`py-1 rounded font-bold capitalize cursor-pointer ${
-                          (styleConfig.arcShape || 'arch') === sh
-                            ? 'bg-[#20B038] text-white'
-                            : 'bg-[#111215] text-[#8E9192]'
+                        className={`py-1.5 rounded font-bold cursor-pointer transition-colors border ${
+                          (styleConfig.arcCurveDeg ?? 180) === preset.deg
+                            ? 'bg-[#20B038] text-white border-[#20B038]'
+                            : 'bg-[#111215] text-[#8E9192] border-white/[0.06] hover:text-white'
                         }`}
                       >
-                        {sh}
+                        {preset.label}
                       </button>
                     ))}
                   </div>
+
+                  {/* Continuous How Much Curve Slider (-360° to +360°) */}
                   <div className="flex items-center gap-2">
-                    <span className="text-[#8E9192]">Curve °:</span>
+                    <span className="text-[#8E9192] shrink-0">Curve °:</span>
                     <input
                       type="range"
-                      min={-45}
-                      max={45}
-                      value={styleConfig.arcCurveDeg ?? 24}
-                      onChange={(e) =>
+                      min={-360}
+                      max={360}
+                      step={5}
+                      value={styleConfig.arcCurveDeg ?? 180}
+                      onChange={(e) => {
+                        const val = parseInt(e.target.value, 10) || 0;
                         onUpdateStyle({
-                          arcCurveDeg: parseInt(e.target.value, 10),
-                        })
-                      }
+                          arcEnabled: val !== 0,
+                          arcCurveDeg: val,
+                        });
+                      }}
                       className="flex-1 accent-[#20B038] cursor-pointer"
                     />
-                    <span className="font-mono text-white">
-                      {styleConfig.arcCurveDeg ?? 24}°
-                    </span>
+                    <div className="flex items-center bg-[#111215] border border-white/[0.08] rounded px-1.5 py-0.5 shrink-0">
+                      <input
+                        type="number"
+                        min={-360}
+                        max={360}
+                        step={5}
+                        value={styleConfig.arcCurveDeg ?? 180}
+                        onChange={(e) => {
+                          const raw = parseInt(e.target.value, 10);
+                          const clamped = Number.isNaN(raw)
+                            ? 0
+                            : Math.max(-360, Math.min(360, raw));
+                          onUpdateStyle({
+                            arcEnabled: clamped !== 0,
+                            arcCurveDeg: clamped,
+                          });
+                        }}
+                        className="w-10 bg-transparent text-right font-mono text-white focus:outline-none"
+                      />
+                      <span className="text-[#8E9192] ml-0.5">°</span>
+                    </div>
                   </div>
                 </div>
               )}
@@ -4769,6 +5068,7 @@ export const KalakarLineStylingPanel: React.FC<KalakarLineStylingPanelProps> = (
   userPresets = [],
   customFonts = [],
   onUpdateLineOverride,
+  onUpdateSegmentMeta,
   onUpdateGlobalStyle,
   onClose,
 }) => {
@@ -5067,6 +5367,401 @@ export const KalakarLineStylingPanel: React.FC<KalakarLineStylingPanelProps> = (
                   </button>
                 </div>
               </div>
+
+              {/* Row 4: Multi-Line Count (1 / 2 / 3 Lines) & Per-Line Text + Style Editor */}
+              {(() => {
+                const segMaxLines: 1 | 2 | 3 =
+                  segment.maxLines ??
+                  lineOverride.maxLines ??
+                  styleConfig.maxLines ??
+                  2;
+                const splitPreview = splitSegmentIntoTwoLines(
+                  segment,
+                  styleConfig.primaryTrack
+                );
+                const curL1Text =
+                  segment.customLine1Text !== undefined
+                    ? segment.customLine1Text
+                    : splitPreview.line1Text;
+                const curL2Text =
+                  segment.customLine2Text !== undefined
+                    ? segment.customLine2Text
+                    : splitPreview.line2Text;
+                const curL3Text =
+                  segment.customLine3Text !== undefined
+                    ? segment.customLine3Text
+                    : splitPreview.line3Text || '';
+
+                const l1Size =
+                  segment.line1FontSizePx ??
+                  lineOverride.line1FontSizePx ??
+                  styleConfig.line1FontSizePx ??
+                  Math.round(
+                    (styleConfig.fontSize || 48) *
+                      (styleConfig.smallWordScale || 0.78)
+                  );
+                const l2Size =
+                  segment.line2FontSizePx ??
+                  lineOverride.line2FontSizePx ??
+                  styleConfig.line2FontSizePx ??
+                  Math.round(
+                    (styleConfig.fontSize || 48) *
+                      (styleConfig.bigWordScale || 1.75)
+                  );
+                const l3Size =
+                  segment.line3FontSizePx ??
+                  lineOverride.line3FontSizePx ??
+                  styleConfig.line3FontSizePx ??
+                  l1Size;
+
+                return (
+                  <div className="pt-2 border-t border-white/[0.08] space-y-2">
+                    <div className="flex items-center justify-between gap-1.5">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-300">
+                        Lines in Caption
+                      </span>
+                      <div className="flex items-center gap-1 bg-[#141518] p-0.5 rounded-lg border border-white/[0.08]">
+                        {([1, 2, 3] as const).map((cnt) => (
+                          <button
+                            key={`popup-lines-${cnt}`}
+                            type="button"
+                            onClick={() => {
+                              onUpdateSegmentMeta?.({ maxLines: cnt });
+                              applyOverridePatch({ maxLines: cnt });
+                            }}
+                            className={`px-2 py-0.5 rounded text-[10px] font-bold cursor-pointer transition-colors ${
+                              segMaxLines === cnt
+                                ? 'bg-[#24B47E] text-[#050505]'
+                                : 'text-zinc-400 hover:text-white'
+                            }`}
+                          >
+                            {cnt} {cnt === 1 ? 'Line' : 'Lines'}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Editable Line 1, Line 2, Line 3 Inputs + Per-Line Size (-/+) & Bold/Italic/Shine */}
+                    <div className="space-y-1.5">
+                      {/* LINE 1 */}
+                      <div className="p-2 rounded-lg bg-[#16181C] border border-white/[0.07] space-y-1.5">
+                        <div className="flex items-center justify-between gap-1">
+                          <span className="text-[10px] font-bold text-[#34D399]">
+                            Line 1
+                          </span>
+                          <div className="flex items-center gap-1">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const next = Math.max(14, l1Size - 2);
+                                onUpdateSegmentMeta?.({ line1FontSizePx: next });
+                                applyOverridePatch({ line1FontSizePx: next });
+                              }}
+                              className="w-5 h-5 rounded bg-[#22242A] hover:bg-white/15 text-white font-bold text-xs flex items-center justify-center cursor-pointer"
+                            >
+                              -
+                            </button>
+                            <span className="text-[10px] font-mono text-white w-8 text-center">
+                              {l1Size}px
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const next = Math.min(130, l1Size + 2);
+                                onUpdateSegmentMeta?.({ line1FontSizePx: next });
+                                applyOverridePatch({ line1FontSizePx: next });
+                              }}
+                              className="w-5 h-5 rounded bg-[#22242A] hover:bg-white/15 text-white font-bold text-xs flex items-center justify-center cursor-pointer"
+                            >
+                              +
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const next = !(
+                                  segment.line1Bold ?? lineOverride.line1Bold
+                                );
+                                onUpdateSegmentMeta?.({ line1Bold: next });
+                                applyOverridePatch({ line1Bold: next });
+                              }}
+                              className={`w-5 h-5 rounded text-[10px] font-black cursor-pointer ${
+                                segment.line1Bold ?? lineOverride.line1Bold
+                                  ? 'bg-[#24B47E] text-[#050505]'
+                                  : 'bg-[#22242A] text-zinc-400 hover:text-white'
+                              }`}
+                            >
+                              B
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const next = !(
+                                  segment.line1Italic ?? lineOverride.line1Italic
+                                );
+                                onUpdateSegmentMeta?.({ line1Italic: next });
+                                applyOverridePatch({ line1Italic: next });
+                              }}
+                              className={`w-5 h-5 rounded text-[10px] italic font-serif font-bold cursor-pointer ${
+                                segment.line1Italic ?? lineOverride.line1Italic
+                                  ? 'bg-[#24B47E] text-[#050505]'
+                                  : 'bg-[#22242A] text-zinc-400 hover:text-white'
+                              }`}
+                            >
+                              I
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const next = !(
+                                  segment.line1Shine ?? lineOverride.line1Shine
+                                );
+                                onUpdateSegmentMeta?.({ line1Shine: next });
+                                applyOverridePatch({ line1Shine: next });
+                              }}
+                              className={`px-1 h-5 rounded text-[9px] font-bold cursor-pointer ${
+                                segment.line1Shine ?? lineOverride.line1Shine
+                                  ? 'bg-amber-400 text-zinc-950'
+                                  : 'bg-[#22242A] text-zinc-400 hover:text-amber-300'
+                              }`}
+                            >
+                              ✨
+                            </button>
+                          </div>
+                        </div>
+                        <input
+                          type="text"
+                          value={curL1Text}
+                          placeholder="Line 1 words..."
+                          onChange={(e) =>
+                            onUpdateSegmentMeta?.({
+                              customLine1Text: e.target.value,
+                              customLine2Text: curL2Text,
+                            })
+                          }
+                          className="w-full bg-[#111215] border border-white/[0.08] rounded px-2 py-1 text-[11px] text-white focus:outline-none focus:border-[#24B47E]"
+                        />
+                      </div>
+
+                      {/* LINE 2 (when 2 or 3 lines) */}
+                      {segMaxLines >= 2 && (
+                        <div className="p-2 rounded-lg bg-[#16181C] border border-white/[0.07] space-y-1.5">
+                          <div className="flex items-center justify-between gap-1">
+                            <span className="text-[10px] font-bold text-amber-300">
+                              Line 2 (Hero)
+                            </span>
+                            <div className="flex items-center gap-1">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const next = Math.max(16, l2Size - 2);
+                                  onUpdateSegmentMeta?.({
+                                    line2FontSizePx: next,
+                                  });
+                                  applyOverridePatch({ line2FontSizePx: next });
+                                }}
+                                className="w-5 h-5 rounded bg-[#22242A] hover:bg-white/15 text-white font-bold text-xs flex items-center justify-center cursor-pointer"
+                              >
+                                -
+                              </button>
+                              <span className="text-[10px] font-mono text-white w-8 text-center">
+                                {l2Size}px
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const next = Math.min(150, l2Size + 2);
+                                  onUpdateSegmentMeta?.({
+                                    line2FontSizePx: next,
+                                  });
+                                  applyOverridePatch({ line2FontSizePx: next });
+                                }}
+                                className="w-5 h-5 rounded bg-[#22242A] hover:bg-white/15 text-white font-bold text-xs flex items-center justify-center cursor-pointer"
+                              >
+                                +
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const next = !(
+                                    segment.line2Bold ??
+                                    lineOverride.line2Bold ??
+                                    true
+                                  );
+                                  onUpdateSegmentMeta?.({ line2Bold: next });
+                                  applyOverridePatch({ line2Bold: next });
+                                }}
+                                className={`w-5 h-5 rounded text-[10px] font-black cursor-pointer ${
+                                  segment.line2Bold ??
+                                  lineOverride.line2Bold ??
+                                  true
+                                    ? 'bg-[#24B47E] text-[#050505]'
+                                    : 'bg-[#22242A] text-zinc-400 hover:text-white'
+                                }`}
+                              >
+                                B
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const next = !(
+                                    segment.line2Italic ??
+                                    lineOverride.line2Italic
+                                  );
+                                  onUpdateSegmentMeta?.({ line2Italic: next });
+                                  applyOverridePatch({ line2Italic: next });
+                                }}
+                                className={`w-5 h-5 rounded text-[10px] italic font-serif font-bold cursor-pointer ${
+                                  segment.line2Italic ?? lineOverride.line2Italic
+                                    ? 'bg-[#24B47E] text-[#050505]'
+                                    : 'bg-[#22242A] text-zinc-400 hover:text-white'
+                                }`}
+                              >
+                                I
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const next = !(
+                                    segment.line2Shine ?? lineOverride.line2Shine
+                                  );
+                                  onUpdateSegmentMeta?.({ line2Shine: next });
+                                  applyOverridePatch({ line2Shine: next });
+                                }}
+                                className={`px-1 h-5 rounded text-[9px] font-bold cursor-pointer ${
+                                  segment.line2Shine ?? lineOverride.line2Shine
+                                    ? 'bg-amber-400 text-zinc-950'
+                                    : 'bg-[#22242A] text-zinc-400 hover:text-amber-300'
+                                }`}
+                              >
+                                ✨
+                              </button>
+                            </div>
+                          </div>
+                          <input
+                            type="text"
+                            value={curL2Text}
+                            placeholder="Line 2 hero words..."
+                            onChange={(e) =>
+                              onUpdateSegmentMeta?.({
+                                customLine1Text: curL1Text,
+                                customLine2Text: e.target.value,
+                              })
+                            }
+                            className="w-full bg-[#111215] border border-white/[0.08] rounded px-2 py-1 text-[11px] text-white focus:outline-none focus:border-[#24B47E]"
+                          />
+                        </div>
+                      )}
+
+                      {/* LINE 3 (when 3 lines) */}
+                      {segMaxLines === 3 && (
+                        <div className="p-2 rounded-lg bg-[#16181C] border border-white/[0.07] space-y-1.5">
+                          <div className="flex items-center justify-between gap-1">
+                            <span className="text-[10px] font-bold text-sky-300">
+                              Line 3
+                            </span>
+                            <div className="flex items-center gap-1">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const next = Math.max(14, l3Size - 2);
+                                  onUpdateSegmentMeta?.({
+                                    line3FontSizePx: next,
+                                  });
+                                  applyOverridePatch({ line3FontSizePx: next });
+                                }}
+                                className="w-5 h-5 rounded bg-[#22242A] hover:bg-white/15 text-white font-bold text-xs flex items-center justify-center cursor-pointer"
+                              >
+                                -
+                              </button>
+                              <span className="text-[10px] font-mono text-white w-8 text-center">
+                                {l3Size}px
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const next = Math.min(130, l3Size + 2);
+                                  onUpdateSegmentMeta?.({
+                                    line3FontSizePx: next,
+                                  });
+                                  applyOverridePatch({ line3FontSizePx: next });
+                                }}
+                                className="w-5 h-5 rounded bg-[#22242A] hover:bg-white/15 text-white font-bold text-xs flex items-center justify-center cursor-pointer"
+                              >
+                                +
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const next = !(
+                                    segment.line3Bold ?? lineOverride.line3Bold
+                                  );
+                                  onUpdateSegmentMeta?.({ line3Bold: next });
+                                  applyOverridePatch({ line3Bold: next });
+                                }}
+                                className={`w-5 h-5 rounded text-[10px] font-black cursor-pointer ${
+                                  segment.line3Bold ?? lineOverride.line3Bold
+                                    ? 'bg-[#24B47E] text-[#050505]'
+                                    : 'bg-[#22242A] text-zinc-400 hover:text-white'
+                                }`}
+                              >
+                                B
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const next = !(
+                                    segment.line3Italic ??
+                                    lineOverride.line3Italic
+                                  );
+                                  onUpdateSegmentMeta?.({ line3Italic: next });
+                                  applyOverridePatch({ line3Italic: next });
+                                }}
+                                className={`w-5 h-5 rounded text-[10px] italic font-serif font-bold cursor-pointer ${
+                                  segment.line3Italic ?? lineOverride.line3Italic
+                                    ? 'bg-[#24B47E] text-[#050505]'
+                                    : 'bg-[#22242A] text-zinc-400 hover:text-white'
+                                }`}
+                              >
+                                I
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const next = !(
+                                    segment.line3Shine ?? lineOverride.line3Shine
+                                  );
+                                  onUpdateSegmentMeta?.({ line3Shine: next });
+                                  applyOverridePatch({ line3Shine: next });
+                                }}
+                                className={`px-1 h-5 rounded text-[9px] font-bold cursor-pointer ${
+                                  segment.line3Shine ?? lineOverride.line3Shine
+                                    ? 'bg-amber-400 text-zinc-950'
+                                    : 'bg-[#22242A] text-zinc-400 hover:text-amber-300'
+                                }`}
+                              >
+                                ✨
+                              </button>
+                            </div>
+                          </div>
+                          <input
+                            type="text"
+                            value={curL3Text}
+                            placeholder="Line 3 words..."
+                            onChange={(e) =>
+                              onUpdateSegmentMeta?.({
+                                customLine1Text: curL1Text,
+                                customLine2Text: curL2Text,
+                                customLine3Text: e.target.value,
+                              })
+                            }
+                            className="w-full bg-[#111215] border border-white/[0.08] rounded px-2 py-1 text-[11px] text-white focus:outline-none focus:border-[#24B47E]"
+                          />
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
             </div>
           )}
         </div>
@@ -5092,6 +5787,112 @@ export const KalakarLineStylingPanel: React.FC<KalakarLineStylingPanelProps> = (
             <span className="w-4 h-4 rounded-full bg-[#15161A] shadow-md transition-transform" />
           </button>
         </div>
+
+        {/* SECTION 2.5: TEXT CURVE (⌒) — 180°, 360°, Reverse & Custom Angle */}
+        {(() => {
+          const lineArcDeg =
+            segment.arcCurveDeg !== undefined
+              ? segment.arcCurveDeg
+              : styleConfig.arcEnabled
+              ? styleConfig.arcCurveDeg || 0
+              : 0;
+          const isLineCurved = lineArcDeg !== 0;
+          return (
+            <div className="px-3.5 py-2.5 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-extrabold tracking-[0.09em] text-zinc-300 uppercase flex items-center gap-1.5">
+                  <span>TEXT CURVE (⌒)</span>
+                  {isLineCurved && (
+                    <span className="px-1.5 py-0.5 rounded bg-[#163326] text-[#34D399] font-mono text-[9px]">
+                      {lineArcDeg > 0 ? `+${lineArcDeg}°` : `${lineArcDeg}°`}
+                    </span>
+                  )}
+                </span>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={isLineCurved}
+                  onClick={() =>
+                    onUpdateSegmentMeta?.({
+                      arcCurveDeg: isLineCurved ? 0 : 180,
+                    })
+                  }
+                  className={`w-9 h-5 rounded-full p-0.5 transition-colors cursor-pointer flex items-center ${
+                    isLineCurved
+                      ? 'bg-[#24B47E] justify-end'
+                      : 'bg-[#8E9196] justify-start'
+                  }`}
+                >
+                  <span className="w-4 h-4 rounded-full bg-[#15161A] shadow-md transition-transform" />
+                </button>
+              </div>
+
+              {isLineCurved && (
+                <div className="p-2.5 rounded-xl bg-[#141518] border border-white/[0.08] space-y-2 text-[10px]">
+                  <div className="flex items-center justify-between gap-1.5">
+                    <span className="text-zinc-400">
+                      {lineArcDeg > 0 ? 'Upward Arch' : 'Reversed Curve'}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onUpdateSegmentMeta?.({
+                          arcCurveDeg: -lineArcDeg,
+                        })
+                      }
+                      className="px-2 py-0.5 rounded bg-[#163326] hover:bg-[#24B47E] text-[#34D399] hover:text-[#050505] font-bold border border-[#24B47E]/40 cursor-pointer"
+                    >
+                      ⇄ Reverse
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-4 gap-1">
+                    {[
+                      { deg: 180, label: '180°' },
+                      { deg: 360, label: '360°' },
+                      { deg: -180, label: '-180°' },
+                      { deg: -360, label: '-360°' },
+                    ].map((p) => (
+                      <button
+                        key={`line-pop-curve-${p.deg}`}
+                        type="button"
+                        onClick={() =>
+                          onUpdateSegmentMeta?.({ arcCurveDeg: p.deg })
+                        }
+                        className={`py-1 rounded font-bold cursor-pointer border ${
+                          lineArcDeg === p.deg
+                            ? 'bg-[#24B47E] text-[#050505] border-[#24B47E]'
+                            : 'bg-[#1F2024] text-zinc-300 border-white/[0.08] hover:text-white'
+                        }`}
+                      >
+                        {p.label}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="range"
+                      min={-360}
+                      max={360}
+                      step={5}
+                      value={lineArcDeg}
+                      onChange={(e) =>
+                        onUpdateSegmentMeta?.({
+                          arcCurveDeg: parseInt(e.target.value, 10) || 0,
+                        })
+                      }
+                      className="flex-1 accent-[#24B47E] cursor-pointer"
+                    />
+                    <span className="font-mono font-bold text-white w-10 text-right">
+                      {lineArcDeg}°
+                    </span>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })()}
 
         {/* SECTION 3: POSITION (X % and Y % Card) */}
         <div className="px-3.5 py-3 space-y-2">

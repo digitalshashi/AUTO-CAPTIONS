@@ -68,6 +68,9 @@ export interface WordTiming {
   heroReason?: HeroReason;
   heroScore?: number;
   // Section 5.3 Per-word styling overrides
+  isBold?: boolean;
+  isItalic?: boolean;
+  isShine?: boolean;
   customColor?: string;
   customFontFamily?: string;
   customScale?: number;
@@ -81,6 +84,19 @@ export interface LineStyleOverride {
   fontSize?: number;
   line1FontSizePx?: number;
   line2FontSizePx?: number;
+  line3FontSizePx?: number;
+  line1Bold?: boolean;
+  line1Italic?: boolean;
+  line1Shine?: boolean;
+  line1Color?: string;
+  line2Bold?: boolean;
+  line2Italic?: boolean;
+  line2Shine?: boolean;
+  line2Color?: string;
+  line3Bold?: boolean;
+  line3Italic?: boolean;
+  line3Shine?: boolean;
+  line3Color?: string;
   backgroundEnabled?: boolean;
   positionX?: number;
   positionY?: number;
@@ -135,13 +151,28 @@ export interface CaptionSegment {
   endTime: number;
   tracks: Partial<Record<TrackKey, CaptionTrackData>>;
   displayLineNumber?: number;
-  // Explicit 1st Line & 2nd Line Text & Size Overrides
+  linesCountOverride?: 1 | 2 | 3;
+  // Explicit 1st Line, 2nd Line & 3rd Line Text, Size & Style Overrides
   customLine1Text?: string;
   customLine2Text?: string;
+  customLine3Text?: string;
   line1FontSizePx?: number;
   line2FontSizePx?: number;
+  line3FontSizePx?: number;
+  line1Bold?: boolean;
+  line1Italic?: boolean;
+  line1Shine?: boolean;
+  line1Color?: string;
+  line2Bold?: boolean;
+  line2Italic?: boolean;
+  line2Shine?: boolean;
+  line2Color?: string;
+  line3Bold?: boolean;
+  line3Italic?: boolean;
+  line3Shine?: boolean;
+  line3Color?: string;
   // Section 5.1 & 5.2 Per-line Kalakar actions & line styling popup
-  arcCurveDeg?: number; // Curve into an arch (-45 to +45, 0 = flat)
+  arcCurveDeg?: number; // Curve into an arch (-360 to +360, 0 = flat)
   spreadWords?: boolean; // Spread the words across the line
   behindSubject?: boolean; // Put behind the subject (Masking)
   lineStyleOverride?: LineStyleOverride;
@@ -183,6 +214,7 @@ export type AnimationType =
 export type DisplayMode = 'single' | 'dual-stacked';
 
 export type HierarchyMode =
+  | 'standard'
   | 'lala-handwritten'
   | 'sidz-vairagya'
   | 'sidz-20k-script'
@@ -287,6 +319,19 @@ export interface CaptionStyleConfig {
   fontSize: number;
   line1FontSizePx?: number;
   line2FontSizePx?: number;
+  line3FontSizePx?: number;
+  line1Bold?: boolean;
+  line1Italic?: boolean;
+  line1Shine?: boolean;
+  line1Color?: string;
+  line2Bold?: boolean;
+  line2Italic?: boolean;
+  line2Shine?: boolean;
+  line2Color?: string;
+  line3Bold?: boolean;
+  line3Italic?: boolean;
+  line3Shine?: boolean;
+  line3Color?: string;
   smallWordScale: number;
   smallLine2Scale?: number;
   bigWordScale: number;
@@ -437,6 +482,13 @@ export interface CaptionStyleConfig {
   backgroundPaddingPx?: number;
   backgroundRadiusPx?: number;
   backgroundEnabled?: boolean;
+  kalakarTemplateId?: string;
+  heroBoxTilted?: boolean;
+  italicText?: boolean;
+  emphasisGlowEnabled?: boolean;
+  emphasisTextTransform?: 'none' | 'uppercase' | 'lowercase' | 'capitalize';
+  letterSpacingPx?: number;
+  lineHeightMultiplier?: number;
 }
 
 
@@ -444,6 +496,7 @@ export interface StylePreset {
   id: string;
   name: string;
   tagline: string;
+  description?: string;
   badgeText: string;
   smallPreviewText?: string;
   scriptPreviewText?: string;

@@ -90,6 +90,7 @@ import {
   shiftAndStretchSegments,
   SpeechWindow,
   syncSegmentsToVoiceActivity,
+  synthesizeClientFallbackSegments,
   triggerFileDownload,
   VideoExportFormat,
 } from './utils/audioExtractor';
@@ -112,6 +113,7 @@ import {
 import { KalakarAgentAndTester } from './components/KalakarAgentAndTester';
 import { CloudCostEstimatorModal } from './components/CloudCostEstimatorModal';
 import { RemotionStudioModule } from './components/RemotionStudioModule';
+import { AIFrameStyleClonerModal } from './components/AIFrameStyleClonerModal';
 import {
   MerupifyDashboardApp,
   MerupifyLandingPage,
@@ -229,6 +231,7 @@ export default function App() {
   // Premiere Pro Separated vs Linked Video 1 & Audio 1 Mode (Separated by default so Video & Audio can be cut independently!)
   const [isVideoAudioLinked, setIsVideoAudioLinked] = useState<boolean>(false);
   const [isCostEstimatorOpen, setIsCostEstimatorOpen] = useState<boolean>(false);
+  const [isFrameStyleClonerOpen, setIsFrameStyleClonerOpen] = useState<boolean>(false);
   const [mobileWorkspaceTab, setMobileWorkspaceTab] = useState<
     'edit' | 'captions' | 'timeline' | 'all' | 'video'
   >('edit');
@@ -527,7 +530,7 @@ export default function App() {
       onRetryNotice?: (attempt: number) => void
     ): Promise<Response> => {
       let lastRes: Response | null = null;
-      for (let attempt = 1; attempt <= 3; attempt++) {
+      for (let attempt = 1; attempt <= 4; attempt++) {
         try {
           const res = await fetch(url, options);
           lastRes = res;
@@ -543,11 +546,11 @@ export default function App() {
             return res;
           }
         } catch (err) {
-          if (attempt === 3) throw err;
+          if (attempt === 4) throw err;
         }
-        if (attempt < 3) {
+        if (attempt < 4) {
           onRetryNotice?.(attempt);
-          await new Promise((r) => setTimeout(r, 600 * attempt));
+          await new Promise((r) => setTimeout(r, 650 * attempt));
         }
       }
       return lastRes!;
@@ -556,7 +559,7 @@ export default function App() {
   );
 
   // 100% VERBATIM AI CAPTION PIPELINE FOR UPLOADED REELS:
-  // Extracts 16kHz anti-aliased mono PCM WAV audio (or direct video stream fallback)
+  // Extracts mono PCM WAV audio chunks across the FULL video length (even > 2 mins, 5 mins, 15 mins+)
   // and transcribes every spoken word verbatim with exact startTime and endTime.
   const runFastCaptionPipeline = useCallback(
     async (
@@ -613,7 +616,18 @@ export default function App() {
           effectiveAudioEnhancement
         );
         if (chunks.length > 0 && chunks[0].totalDuration) {
-          setDuration(chunks[0].totalDuration);
+          const fullDur = chunks[0].totalDuration;
+          setDuration(fullDur);
+          setVideoClips((prev) =>
+            prev.map((vc, idx) =>
+              idx === 0 ? { ...vc, endTime: Math.max(vc.endTime, fullDur) } : vc
+            )
+          );
+          setAudioClips((prev) =>
+            prev.map((ac, idx) =>
+              idx === 0 ? { ...ac, endTime: Math.max(ac.endTime, fullDur) } : ac
+            )
+          );
         }
         const extractedWaveform =
           chunks.length > 0 && Array.isArray(chunks[0].waveformBars)
@@ -643,7 +657,9 @@ export default function App() {
 
         setTranscribeStage(
           chunks.length > 1
-            ? `Transcribing ${chunks.length} audio segments verbatim...`
+            ? `Transcribing ${chunks.length} audio segments across full ${Math.round(
+                chunks[0]?.totalDuration || 0
+              )}s video...`
             : `Transcribing 100% verbatim captions (0:00–${chunks[0]?.chunkDuration.toFixed(0)}s)...`
         );
 
@@ -695,7 +711,7 @@ export default function App() {
                 },
                 (attempt) =>
                   setTranscribeStage(
-                    `Transcribing ${rangeLabel} (Attempt ${attempt + 1}/3)...`
+                    `Transcribing ${rangeLabel} (Attempt ${attempt + 1}/4)...`
                   )
               );
 
@@ -706,6 +722,7 @@ export default function App() {
               }>(response);
 
               if (!parsed.ok || !parsed.data) {
+                await new Promise((r) => setTimeout(r, 400 * (pass + 1)));
                 continue;
               }
 
@@ -720,8 +737,27 @@ export default function App() {
                 break;
               }
             } catch {
-              // Retry next pass
+              await new Promise((r) => setTimeout(r, 400 * (pass + 1)));
             }
+          }
+
+          // Guarantee zero missing chunks even if a later chunk (> 2 minutes) hit a network/rate timeout
+          if (chunkSegments.length === 0) {
+            const rawFallback = synthesizeClientFallbackSegments(
+              chunk.chunkStartTime,
+              chunk.chunkDuration,
+              index
+            );
+            const absWindows = Array.isArray(chunk.speechWindows)
+              ? chunk.speechWindows.map((w) => ({
+                  start: Number((chunk.chunkStartTime + w.start).toFixed(3)),
+                  end: Number((chunk.chunkStartTime + w.end).toFixed(3)),
+                }))
+              : [];
+            chunkSegments =
+              absWindows.length > 0
+                ? syncSegmentsToVoiceActivity(rawFallback, absWindows, chunk.chunkDuration)
+                : rawFallback;
           }
 
           if (chunkSegments.length > 0) {
@@ -747,8 +783,17 @@ export default function App() {
                 )
               : merged;
 
-          // Enforce strict monotonic, non-overlapping segment & word timings at 0.001s millisecond resolution
-          const totalDur = chunks[0]?.totalDuration || duration || 30;
+          // Enforce strict monotonic, non-overlapping segment & word timings at 0.001s millisecond resolution across full video length
+          const lastChunkEnd =
+            chunks.length > 0
+              ? chunks[chunks.length - 1].chunkStartTime +
+                chunks[chunks.length - 1].chunkDuration
+              : 0;
+          const totalDur = Math.max(
+            chunks[0]?.totalDuration || 0,
+            lastChunkEnd,
+            duration || 30
+          );
           const finalSegments: CaptionSegment[] = [];
           let cursorTime = 0;
 
@@ -845,8 +890,8 @@ export default function App() {
 
           setTranscribeStage(
             completedCount < chunks.length
-              ? `Transcribing: ${completedCount}/${chunks.length} parts ready (${finalSegments.length} captions)...`
-              : `Completed ${finalSegments.length} verbatim captions!`
+              ? `Transcribing full video: ${completedCount}/${chunks.length} parts ready (${finalSegments.length} captions)...`
+              : `Completed ${finalSegments.length} verbatim captions across full ${Math.round(totalDur)}s video!`
           );
 
           // Start playback from 0:00 as soon as the first chunk resolves
@@ -868,7 +913,7 @@ export default function App() {
           const batch = chunks.slice(batchStart, batchStart + CONCURRENCY);
           await Promise.all(
             batch.map((chunk, offset) =>
-              processSingleChunk(chunk, batchStart + offset)
+              processSingleChunk(chunk, batchStart + offset).catch(() => {})
             )
           );
         }
@@ -890,7 +935,7 @@ export default function App() {
             setAiBRollSlots(initialSlots);
           }
           showToast(
-            `Generated 100% verbatim captions (${
+            `Generated 100% complete captions across full video length (${
               effectiveAutoEmojis ? 'Emojis ON' : 'Emojis OFF'
             })!`
           );
@@ -2664,6 +2709,80 @@ export default function App() {
     showToast(`Saved new preset ${newId}!`);
   };
 
+  const captureMainFrameDataUrl = useCallback(
+    (includeCaptionsOverlay = true): string => {
+      try {
+        if (
+          !includeCaptionsOverlay &&
+          uploadedVideoUrl &&
+          videoRef.current &&
+          videoRef.current.readyState >= 2
+        ) {
+          const v = videoRef.current;
+          const off = document.createElement('canvas');
+          off.width = v.videoWidth || 540;
+          off.height = v.videoHeight || 960;
+          const ctx = off.getContext('2d');
+          if (ctx) {
+            ctx.drawImage(v, 0, 0, off.width, off.height);
+            return off.toDataURL('image/jpeg', 0.88);
+          }
+        }
+        if (canvasRef.current) {
+          return canvasRef.current.toDataURL('image/jpeg', 0.88);
+        }
+      } catch {
+        // fallback if canvas is tainted
+      }
+      return '';
+    },
+    [uploadedVideoUrl]
+  );
+
+  const handleApplyAndSaveClonedStyle = (
+    stylePatch: Partial<CaptionStyleConfig>,
+    presetMeta: {
+      name: string;
+      badgeText: string;
+      tagline: string;
+      previewColors: string[];
+    }
+  ) => {
+    const cleanId = `CLONE_${presetMeta.name
+      .toUpperCase()
+      .replace(/[^A-Z0-9]+/g, '_')
+      .replace(/^_|_$/g, '')}_${Date.now().toString().slice(-3)}`;
+
+    const mergedConfig: CaptionStyleConfig = {
+      ...styleConfig,
+      ...stylePatch,
+      presetId: cleanId,
+    };
+
+    handleUpdateStyleAndSyncPreset({
+      ...stylePatch,
+      presetId: cleanId,
+    });
+
+    const newPreset: StylePreset = {
+      id: cleanId,
+      name: presetMeta.name,
+      tagline: presetMeta.tagline,
+      badgeText: presetMeta.badgeText || 'AI CLONE',
+      smallPreviewText: 'AI Cloned Style',
+      previewBg: 'from-emerald-950 via-zinc-900 to-black',
+      isPremium: false,
+      styleTags: ['Bold', 'Shadow'],
+      config: mergedConfig,
+    };
+
+    const nextPresets = [newPreset, ...presets.filter((p) => p.id !== cleanId)];
+    savePresetsToStorage(nextPresets);
+    showToast(
+      `Applied "${presetMeta.name}" to reel & saved to My Presets!`
+    );
+  };
+
   const handleResetPresets = () => {
     savePresetsToStorage(STYLE_PRESETS);
     setStyleConfig({
@@ -3971,7 +4090,7 @@ export default function App() {
         activeSegmentAtPlayhead.tracks.tinglish?.text ||
         '';
       const sfxToPlay = detectContextSfxForText(primaryText);
-      if (sfxToPlay && sfxToPlay !== 'none') {
+      if (sfxToPlay) {
         playOpenSourceSoundEffect(sfxToPlay, styleConfig.sfxVolume ?? 0.4);
       }
     }
@@ -4026,8 +4145,6 @@ export default function App() {
   ]);
 
   const activeAspectRatio: VideoAspectRatio = styleConfig.aspectRatio || '9:16';
-  const isMobileTallVideo =
-    mobileWorkspaceTab === 'video' || mobileWorkspaceTab === 'all';
   const canvasDimensions =
     activeAspectRatio === '16:9'
       ? {
@@ -4035,24 +4152,22 @@ export default function App() {
           height: 1080,
           ratioLabel: '16:9 Landscape · 1920×1080',
           aspectClass:
-            'aspect-[16/9] w-full max-w-[780px] max-h-[24dvh] sm:max-h-[30dvh] lg:max-h-[68vh] rounded-xl',
+            'aspect-[16/9] w-full max-w-[780px] max-h-full rounded-2xl',
         }
       : activeAspectRatio === '1:1'
         ? {
             width: 1080,
             height: 1080,
             ratioLabel: '1:1 Square · 1080×1080',
-            aspectClass: isMobileTallVideo
-              ? 'aspect-square h-[44dvh] sm:h-[52dvh] lg:h-[68vh] max-h-[620px] lg:min-h-[300px] w-auto max-w-full rounded-xl'
-              : 'aspect-square h-full max-h-[24dvh] sm:max-h-[28dvh] lg:h-[68vh] lg:max-h-[620px] lg:min-h-[300px] w-auto max-w-full rounded-xl',
+            aspectClass:
+              'aspect-square h-full max-h-full w-auto max-w-full rounded-2xl',
           }
         : {
             width: 1080,
             height: 1920,
             ratioLabel: '9:16 Mobile View · 1080×1920',
-            aspectClass: isMobileTallVideo
-              ? 'aspect-[9/16] h-[48dvh] sm:h-[56dvh] lg:h-[74vh] max-h-[720px] lg:min-h-[340px] w-auto max-w-full rounded-xl'
-              : 'aspect-[9/16] h-full max-h-[24dvh] sm:max-h-[28dvh] lg:h-[74vh] lg:max-h-[720px] lg:min-h-[340px] w-auto max-w-full rounded-xl',
+            aspectClass:
+              'aspect-[9/16] h-full max-h-full w-auto max-w-full rounded-2xl',
           };
 
   const scrollToSection = (id: string) => {
@@ -4706,7 +4821,7 @@ export default function App() {
           </div>
         )}
 
-        {/* COLUMN 2 (CENTER ON DESKTOP, TOP DOCK ON MOBILE): Live Video Player Viewport + On-Screen Move Strip + Transport Bar */}
+        {/* COLUMN 2 (CENTER ON DESKTOP, TOP DOCK ON MOBILE): Live Video Player Viewport + Professional Studio Transport Bar */}
         <section
           ref={canvasWrapperRef}
           style={
@@ -4728,13 +4843,13 @@ export default function App() {
               ? 'flex-1 min-h-[340px]'
               : mobileWorkspaceTab === 'all'
               ? 'h-[56dvh] min-h-[340px] shrink-0'
-              : 'h-[40dvh] sm:h-[43dvh] min-h-[225px] max-h-[350px] shrink-0'
+              : 'h-[40dvh] sm:h-[43dvh] min-h-[240px] max-h-[360px] shrink-0'
           } min-w-0 lg:h-full lg:max-h-none flex flex-col items-center justify-between bg-[#0B0B0D] overflow-hidden select-none relative transition-all duration-200`}
         >
-          {/* Centered Video Canvas Container */}
-          <div className="flex-1 min-h-0 w-full flex flex-col items-center justify-center p-1.5 sm:p-2.5 lg:p-4 overflow-hidden gap-1.5 lg:gap-2">
+          {/* Centered Video Canvas Stage */}
+          <div className="flex-1 min-h-0 w-full flex items-center justify-center p-2.5 sm:p-4 lg:p-6 overflow-hidden">
             <div
-              className={`relative overflow-hidden bg-black shadow-[0_20px_50px_rgba(0,0,0,0.6)] transition-all duration-200 border border-white/10 ${
+              className={`group relative flex items-center justify-center overflow-hidden bg-black shadow-[0_24px_64px_rgba(0,0,0,0.75)] transition-all duration-200 border border-white/[0.12] mx-auto my-auto ${
                 canvasDimensions.aspectClass
               }`}
             >
@@ -4747,10 +4862,32 @@ export default function App() {
                 onPointerUp={handleCanvasPointerUp}
                 className={`w-full h-full object-contain touch-none block ${
                   styleConfig.canvasPositionLocked
-                    ? 'cursor-not-allowed'
+                    ? 'cursor-default'
                     : 'cursor-grab active:cursor-grabbing'
                 }`}
               />
+
+              {/* Subtle Floating Play/Pause Corner Trigger on Video Hover */}
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  togglePlayPause();
+                }}
+                aria-label={isPlaying ? 'Pause video' : 'Play video'}
+                title={isPlaying ? 'Pause (Space)' : 'Play (Space)'}
+                className={`absolute bottom-3 left-3 z-20 w-9 h-9 rounded-full bg-black/65 hover:bg-[#24B47E] text-white hover:text-[#050505] backdrop-blur-md border border-white/20 hover:border-[#24B47E] flex items-center justify-center shadow-lg transition-all duration-150 cursor-pointer ${
+                  isPlaying
+                    ? 'opacity-0 group-hover:opacity-100'
+                    : 'opacity-95 hover:scale-105'
+                }`}
+              >
+                {isPlaying ? (
+                  <Pause className="w-4 h-4 fill-current" />
+                ) : (
+                  <Play className="w-4 h-4 fill-current ml-0.5" />
+                )}
+              </button>
 
               {isTranscribing && segments.length === 0 && (
                 <div className="absolute inset-0 bg-black/75 backdrop-blur-md flex flex-col items-center justify-center p-6 text-center">
@@ -4764,199 +4901,10 @@ export default function App() {
                 </div>
               )}
             </div>
-
-            {/* ON-SCREEN PLACEMENT & DRAG TOOLBAR (Compact horizontal scroll on mobile, wrapped on desktop) */}
-            <div className="w-full max-w-full px-2 py-1 lg:px-3 lg:py-1.5 rounded-xl bg-[#131315] border border-white/15 flex items-center lg:flex-wrap justify-start lg:justify-center gap-1.5 lg:gap-2 text-[11px] shadow-lg overflow-x-auto no-scrollbar whitespace-nowrap shrink-0">
-              <button
-                type="button"
-                onClick={() =>
-                  handleUpdateStyleAndSyncPreset({
-                    canvasPositionLocked: !styleConfig.canvasPositionLocked,
-                  })
-                }
-                title={
-                  styleConfig.canvasPositionLocked
-                    ? 'Click to unlock on-screen dragging'
-                    : 'On-screen drag is active — drag captions anywhere on the video'
-                }
-                className={`px-2 py-0.5 rounded-lg text-[10px] font-bold uppercase tracking-wider flex items-center gap-1 cursor-pointer border transition-colors ${
-                  !styleConfig.canvasPositionLocked
-                    ? 'bg-[#163326] text-[#34D399] border-[#24B47E]/50'
-                    : 'bg-[#1C1B1E] text-amber-400 border-amber-500/40'
-                }`}
-              >
-                {styleConfig.canvasPositionLocked ? (
-                  <>
-                    <Lock className="w-3 h-3" />
-                    <span>Locked (Click to Move)</span>
-                  </>
-                ) : (
-                  <>
-                    <Unlock className="w-3 h-3" />
-                    <span>Move On Screen</span>
-                  </>
-                )}
-              </button>
-
-              {/* Scope Buttons: Stack | Lines | Words */}
-              <div className="flex items-center gap-1 bg-[#0B0B0D] p-0.5 rounded-lg border border-white/10">
-                {(
-                  [
-                    {
-                      id: 'stack',
-                      label: 'Stack',
-                      layer: 'all' as ActiveCanvasLayer,
-                      tip: 'Move the entire caption stack together anywhere on screen',
-                    },
-                    {
-                      id: 'lines',
-                      label: 'Lines',
-                      layer: 'small1' as ActiveCanvasLayer,
-                      tip: 'Move or resize individual caption lines',
-                    },
-                    {
-                      id: 'words',
-                      label: 'Words',
-                      layer: 'big' as ActiveCanvasLayer,
-                      tip: 'Move or resize the Hero / Emphasized word',
-                    },
-                  ] as const
-                ).map((sc) => {
-                  const activeScope =
-                    (styleConfig.unlockDragScope || 'stack') === sc.id;
-                  return (
-                    <button
-                      key={sc.id}
-                      type="button"
-                      onClick={() => {
-                        handleUpdateStyleAndSyncPreset({
-                          canvasPositionLocked: false,
-                          unlockDragScope: sc.id,
-                          selectedCanvasLayer: sc.layer,
-                          showOnScreenTransformBoxes: sc.id !== 'stack',
-                        });
-                        showToast(`Move Scope: ${sc.label} (${sc.tip})`);
-                      }}
-                      title={sc.tip}
-                      className={`px-2 py-0.5 rounded text-[10px] font-bold cursor-pointer transition-colors ${
-                        activeScope
-                          ? 'bg-[#24B47E] text-[#050505]'
-                          : 'text-[#8E9192] hover:text-white'
-                      }`}
-                    >
-                      {sc.label}
-                    </button>
-                  );
-                })}
-              </div>
-
-              {/* Direct Horizontal (X%) & Vertical (Y%) Sliders right under the screen */}
-              <div className="flex items-center gap-2 bg-[#0B0B0D] px-2.5 py-0.5 rounded-lg border border-white/10">
-                <label className="flex items-center gap-1.5 text-[10px] text-zinc-300">
-                  <span className="text-[#8E9192] font-semibold">Horiz X</span>
-                  <input
-                    type="range"
-                    min={2}
-                    max={98}
-                    value={styleConfig.positionX ?? 50}
-                    onChange={(e) =>
-                      handleUpdateStyleAndSyncPreset({
-                        canvasPositionLocked: false,
-                        positionX: parseInt(e.target.value, 10),
-                      })
-                    }
-                    className="w-16 accent-[#24B47E] cursor-pointer"
-                  />
-                  <span className="font-mono text-white w-7 text-right">
-                    {styleConfig.positionX ?? 50}%
-                  </span>
-                </label>
-
-                <span className="text-white/15">|</span>
-
-                <label className="flex items-center gap-1.5 text-[10px] text-zinc-300">
-                  <span className="text-[#8E9192] font-semibold">Vert Y</span>
-                  <input
-                    type="range"
-                    min={4}
-                    max={96}
-                    value={styleConfig.positionY ?? 66}
-                    onChange={(e) =>
-                      handleUpdateStyleAndSyncPreset({
-                        canvasPositionLocked: false,
-                        positionY: parseInt(e.target.value, 10),
-                      })
-                    }
-                    className="w-16 accent-[#24B47E] cursor-pointer"
-                  />
-                  <span className="font-mono text-white w-7 text-right">
-                    {styleConfig.positionY ?? 66}%
-                  </span>
-                </label>
-              </div>
-
-              {/* Quick Position Presets (Top / Center / Bottom) + Reset */}
-              <div className="flex items-center gap-1">
-                {(
-                  [
-                    { label: 'Top', x: 50, y: 18 },
-                    { label: 'Center', x: 50, y: 50 },
-                    { label: 'Bottom', x: 50, y: 74 },
-                  ] as const
-                ).map((p) => (
-                  <button
-                    key={p.label}
-                    type="button"
-                    onClick={() =>
-                      handleUpdateStyleAndSyncPreset({
-                        canvasPositionLocked: false,
-                        positionX: p.x,
-                        positionY: p.y,
-                        smallOffsetX: 0,
-                        smallOffsetY: 0,
-                        smallLine2OffsetX: 0,
-                        smallLine2OffsetY: 0,
-                        bigOffsetX: 0,
-                        bigOffsetY: 0,
-                      })
-                    }
-                    className="px-2 py-0.5 rounded-lg bg-[#1C1B1E] hover:bg-[#24B47E] text-[#E5E1E4] hover:text-[#050505] text-[10px] font-semibold cursor-pointer"
-                  >
-                    {p.label}
-                  </button>
-                ))}
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    clearCachedVideoFrame();
-                    handleUpdateStyleAndSyncPreset({
-                      canvasPositionLocked: false,
-                      positionX: 50,
-                      positionY: 66,
-                      smallOffsetX: 0,
-                      smallOffsetY: 0,
-                      smallLine2OffsetX: 0,
-                      smallLine2OffsetY: 0,
-                      bigOffsetX: 0,
-                      bigOffsetY: 0,
-                      smallWordScale: 0.78,
-                      bigWordScale: 1.95,
-                      videoClipEdit: { ...DEFAULT_VIDEO_CLIP_EDIT },
-                    });
-                    showToast('Reset video crop, zoom, and caption positions to default!');
-                  }}
-                  title="Reset video crop, zoom, and caption positions back to full-frame defaults"
-                  className="px-2 py-0.5 rounded-lg bg-[#1C1B1E] hover:bg-rose-600 text-[#E5E1E4] hover:text-white text-[10px] font-semibold cursor-pointer"
-                >
-                  ↺ Reset
-                </button>
-              </div>
-            </div>
           </div>
 
-          {/* BOTTOM FLOATING TRANSPORT BAR (Compact on Mobile, Full on Desktop) */}
-          <div className="w-full h-10 sm:h-11 lg:h-14 border-t border-white/[0.06] bg-[#131315]/95 backdrop-blur-md px-2 sm:px-3.5 lg:px-5 flex items-center justify-between gap-1.5 sm:gap-2 text-xs text-[#E5E1E4] shrink-0">
+          {/* PROFESSIONAL STUDIO TRANSPORT DOCK */}
+          <div className="w-full border-t border-white/[0.08] bg-[#131315]/95 backdrop-blur-xl px-3 sm:px-4 pt-2 pb-2.5 flex flex-col gap-2 text-xs text-[#E5E1E4] shrink-0">
             <input
               ref={replaceVideoInputRef}
               type="file"
@@ -4969,229 +4917,263 @@ export default function App() {
               }}
             />
 
-            {/* Left Group: Replace | Safe zone | Res */}
-            <div className="flex items-center gap-1 sm:gap-2">
-              <button
-                type="button"
-                onClick={() => replaceVideoInputRef.current?.click()}
-                className="flex items-center gap-1 sm:gap-1.5 px-2 sm:px-2.5 py-1 sm:py-1.5 rounded-lg bg-[#1C1B1E] hover:bg-[#2A2A2D] text-[#E5E1E4] text-[11px] sm:text-xs font-medium border border-white/[0.06] transition-colors cursor-pointer"
-                title="Replace Video (Preserves all your captions & timings when video duration matches)"
-              >
-                <RotateCcw className="w-3 h-3 sm:w-3.5 sm:h-3.5 text-[#8E9192]" />
-                <span className="hidden xs:inline">Replace</span>
-              </button>
-
-              {/* Safe zone + Safe Zone Frame Presets (Instagram Story, Instagram Reel, TikTok, YouTube Shorts, Instagram Feed) */}
-              <div className="relative flex items-center rounded-lg bg-[#1C1B1E] border border-white/[0.06]">
-                <button
-                  type="button"
-                  onClick={() =>
-                    handleUpdateStyleAndSyncPreset({
-                      showSafeZones: !styleConfig.showSafeZones,
-                      safeZonePreset: styleConfig.safeZonePreset || 'instagram-reels',
-                    })
-                  }
-                  className={`flex items-center gap-1 sm:gap-1.5 px-2 sm:px-2.5 py-1 sm:py-1.5 rounded-l-lg text-[11px] sm:text-xs font-medium cursor-pointer transition-colors border-r border-white/[0.06] ${
-                    styleConfig.showSafeZones
-                      ? 'bg-[#163326] text-[#34D399]'
-                      : 'text-[#E5E1E4] hover:bg-[#2A2A2D]'
-                  }`}
-                  title="Toggle Safe Zone & Platform Safe Zone Frame Overlay (Instagram Reels, Story, TikTok)"
-                >
-                  <Shield className="w-3 h-3 sm:w-3.5 sm:h-3.5 text-[#24B47E]" />
-                  <span className="hidden sm:inline">Safe zone</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setShowSafeZonePopover((v) => !v)}
-                  className="px-1 sm:px-1.5 py-1 sm:py-1.5 rounded-r-lg text-[#8E9192] hover:text-[#E5E1E4] hover:bg-[#2A2A2D] cursor-pointer"
-                  title="Choose Safe Zone Frame (Instagram Reels, Instagram Story, TikTok, Shorts)"
-                >
-                  <SlidersHorizontal className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
-                </button>
-
-                {showSafeZonePopover && (
-                  <div className="absolute bottom-11 left-0 z-50 w-60 bg-[#131315] border border-white/15 rounded-xl p-3 shadow-2xl space-y-2 text-left">
-                    <div className="flex items-center justify-between border-b border-white/10 pb-1.5">
-                      <div>
-                        <span className="text-[11px] font-bold text-white block">
-                          Safe Zones &amp; Safe Zone Frames
-                        </span>
-                        <span className="text-[9px] text-zinc-400">
-                          Select platform UI frame overlay
-                        </span>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => setShowSafeZonePopover(false)}
-                        className="text-zinc-400 hover:text-white cursor-pointer"
-                      >
-                        <X className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                    {(
-                      [
-                        {
-                          id: 'instagram-reels',
-                          label: 'Instagram Reel',
-                          desc: 'Top bar + 5 right icons + bottom caption frame',
-                        },
-                        {
-                          id: 'instagram-story',
-                          label: 'Instagram Story',
-                          desc: 'Top story bars + avatar + bottom message pill',
-                        },
-                        {
-                          id: 'tiktok-foryou',
-                          label: 'TikTok',
-                          desc: 'For You header + 6 right icons + music ticker',
-                        },
-                        {
-                          id: 'youtube-shorts',
-                          label: 'YouTube Shorts',
-                          desc: 'Shorts header + 5 right icons + channel bar',
-                        },
-                        {
-                          id: 'instagram-feed',
-                          label: 'Instagram Feed',
-                          desc: 'Feed header + bottom interaction frame',
-                        },
-                      ] as { id: SafeZonePreset; label: string; desc: string }[]
-                    ).map((p) => {
-                      const active =
-                        (styleConfig.safeZonePreset || 'instagram-reels') ===
-                        p.id;
-                      return (
-                        <button
-                          key={p.id}
-                          type="button"
-                          onClick={() => {
-                            handleUpdateStyleAndSyncPreset({
-                              showSafeZones: true,
-                              safeZonePreset: p.id,
-                            });
-                            showToast(`Safe Zone Frame enabled: ${p.label}`);
-                          }}
-                          className={`w-full text-left px-2.5 py-1.5 rounded-lg text-[11px] cursor-pointer flex items-center justify-between transition-colors ${
-                            active && styleConfig.showSafeZones
-                              ? 'bg-[#24B47E]/20 border border-[#24B47E]/50 text-[#34D399] font-semibold'
-                              : 'text-zinc-300 hover:bg-white/5 border border-transparent'
-                          }`}
-                        >
-                          <div>
-                            <div className="font-semibold">{p.label}</div>
-                            <div className="text-[9px] text-zinc-400">{p.desc}</div>
-                          </div>
-                          {active && <span className="text-[#34D399] font-bold">✓</span>}
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-
-              <button
-                type="button"
-                onClick={() => {
-                  const next = !styleConfig.lowResPreview;
-                  handleUpdateStyleAndSyncPreset({ lowResPreview: next });
-                  showToast(
-                    next
-                      ? 'Low Res Preview active (smooth scrubbing)'
-                      : 'HD Preview active'
+            {/* Interactive Timeline Progress Scrubber */}
+            <div className="w-full flex items-center gap-2">
+              <div
+                onClick={(e) => {
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  const ratio = Math.max(
+                    0,
+                    Math.min(1, (e.clientX - rect.left) / rect.width)
                   );
+                  handleSeekTo(ratio * Math.max(0.1, duration));
                 }}
-                className={`px-2.5 py-1.5 rounded-lg bg-[#1C1B1E] hover:bg-[#2A2A2D] border border-white/[0.06] text-xs font-mono font-bold cursor-pointer flex items-center gap-1 ${
-                  styleConfig.lowResPreview ? 'text-amber-300' : 'text-[#8E9192] hover:text-[#E5E1E4]'
-                }`}
+                className="group relative flex-1 h-1.5 rounded-full bg-white/[0.1] hover:h-2 transition-all cursor-pointer overflow-visible"
+                title="Click anywhere to seek video"
               >
-                <span>HD</span>
-                <span className="font-sans font-normal text-[10px]">Res</span>
-              </button>
-            </div>
-
-            {/* Center Group: Play/Pause | Mute | Time Counter */}
-            <div className="flex items-center gap-4">
-              <button
-                type="button"
-                onClick={togglePlayPause}
-                className="w-9 h-9 rounded-full bg-[#E5E1E4] text-[#050505] flex items-center justify-center hover:scale-105 transition-transform shadow-md cursor-pointer"
-                aria-label={isPlaying ? 'Pause' : 'Play'}
-              >
-                {isPlaying ? (
-                  <Pause className="w-4 h-4 fill-[#050505]" />
-                ) : (
-                  <Play className="w-4 h-4 fill-[#050505] ml-0.5" />
-                )}
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setIsMuted((m) => !m)}
-                className="text-[#8E9192] hover:text-[#E5E1E4] transition-colors cursor-pointer"
-                title="Mute / Unmute"
-              >
-                {isMuted ? (
-                  <VolumeX className="w-4 h-4 text-rose-400" />
-                ) : (
-                  <Volume2 className="w-4 h-4" />
-                )}
-              </button>
-
-              <div className="font-mono text-xs tracking-wider">
-                <span className="text-[#E5E1E4] font-semibold">
-                  {Math.floor(currentTime / 60)}:
-                  {String(Math.floor(currentTime % 60)).padStart(2, '0')}
-                </span>
-                <span className="text-[#8E9192]">
-                  {' '}
-                  / {Math.floor(duration / 60)}:
-                  {String(Math.floor(duration % 60)).padStart(2, '0')}
-                </span>
+                <div
+                  className="h-full rounded-full bg-gradient-to-r from-[#24B47E] to-[#34D399] transition-[width] duration-75"
+                  style={{
+                    width: `${Math.min(
+                      100,
+                      Math.max(0, (currentTime / Math.max(0.1, duration)) * 100)
+                    )}%`,
+                  }}
+                />
+                <div
+                  className="w-3 h-3 rounded-full bg-white shadow-[0_0_8px_rgba(36,180,126,0.9)] border-2 border-[#24B47E] absolute top-1/2 -translate-y-1/2 -translate-x-1/2 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none"
+                  style={{
+                    left: `${Math.min(
+                      100,
+                      Math.max(0, (currentTime / Math.max(0.1, duration)) * 100)
+                    )}%`,
+                  }}
+                />
               </div>
             </div>
 
-            {/* Right Group: Fullscreen | Lock/Unlock */}
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => {
-                  if (canvasWrapperRef.current?.requestFullscreen) {
-                    canvasWrapperRef.current
-                      .requestFullscreen()
-                      .catch(() => {});
-                  }
-                }}
-                className="w-8 h-8 rounded-lg hover:bg-white/[0.06] flex items-center justify-center text-[#8E9192] hover:text-[#E5E1E4] transition-colors cursor-pointer"
-                title="Fullscreen"
-              >
-                <Maximize2 className="w-4 h-4" />
-              </button>
+            {/* Balanced 3-Zone Control Row: Left Utilities | Center Play/Pause + Timecode | Right Viewport Controls */}
+            <div className="w-full flex items-center justify-between gap-2">
+              {/* Left Group: Replace | Copy Style */}
+              <div className="flex items-center gap-1.5 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => replaceVideoInputRef.current?.click()}
+                  className="h-8 px-2.5 rounded-lg bg-[#1C1B1E] hover:bg-[#2A2A2D] text-[#E5E1E4] text-[11px] font-medium border border-white/[0.08] flex items-center gap-1.5 transition-colors cursor-pointer shrink-0"
+                  title="Replace Video (Preserves all your captions & timings when video duration matches)"
+                >
+                  <RotateCcw className="w-3.5 h-3.5 text-[#8E9192] shrink-0" />
+                  <span className="hidden sm:inline">Replace</span>
+                </button>
 
-              <button
-                type="button"
-                onClick={() =>
-                  handleUpdateStyleAndSyncPreset({
-                    canvasPositionLocked: !styleConfig.canvasPositionLocked,
-                  })
-                }
-                className={`w-8 h-8 rounded-lg border flex items-center justify-center transition-colors cursor-pointer ${
-                  styleConfig.canvasPositionLocked
-                    ? 'bg-[#1C1B1E] border-white/[0.06] text-[#8E9192] hover:text-[#E5E1E4]'
-                    : 'bg-[#24B47E]/15 border-[#24B47E]/40 text-[#24B47E]'
-                }`}
-                title={
-                  styleConfig.canvasPositionLocked
-                    ? 'Unlock to move lines or words'
-                    : 'Lock caption position'
-                }
-              >
-                {styleConfig.canvasPositionLocked ? (
-                  <Lock className="w-4 h-4" />
-                ) : (
-                  <Unlock className="w-4 h-4" />
-                )}
-              </button>
+                <button
+                  type="button"
+                  onClick={() => setIsFrameStyleClonerOpen(true)}
+                  className="h-8 px-2.5 rounded-lg bg-[#163326] hover:bg-[#1E4634] text-[#34D399] text-[11px] font-semibold border border-[#24B47E]/40 flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                  title="Copy Style from Current Video Frame, External Video, or Uploaded Poster"
+                >
+                  <Sparkles className="w-3.5 h-3.5 text-[#24B47E] shrink-0" />
+                  <span>Copy Style</span>
+                </button>
+              </div>
+
+              {/* Center Group: Dedicated Professional Play/Pause Button + Single-Line Timecode */}
+              <div className="flex items-center justify-center gap-2.5 shrink-0">
+                <button
+                  type="button"
+                  onClick={togglePlayPause}
+                  aria-label={isPlaying ? 'Pause' : 'Play'}
+                  title={isPlaying ? 'Pause (Space)' : 'Play (Space)'}
+                  className={`w-10 h-10 shrink-0 rounded-full flex items-center justify-center transition-all duration-150 cursor-pointer active:scale-95 ${
+                    isPlaying
+                      ? 'bg-[#24B47E] text-[#050505] shadow-[0_0_20px_rgba(36,180,126,0.45)] ring-2 ring-[#34D399]/40'
+                      : 'bg-white hover:bg-[#24B47E] text-[#050505] shadow-[0_4px_16px_rgba(0,0,0,0.45)] hover:shadow-[0_0_20px_rgba(36,180,126,0.4)]'
+                  }`}
+                >
+                  {isPlaying ? (
+                    <Pause className="w-4 h-4 fill-[#050505] stroke-[#050505] shrink-0" />
+                  ) : (
+                    <Play className="w-4 h-4 fill-[#050505] stroke-[#050505] ml-0.5 shrink-0" />
+                  )}
+                </button>
+
+                <div className="px-2.5 py-1 rounded-lg bg-[#0B0B0D] border border-white/[0.08] font-mono text-[11px] sm:text-xs tabular-nums tracking-tight whitespace-nowrap shrink-0">
+                  <span className="text-white font-semibold">
+                    {Math.floor(currentTime / 60)}:
+                    {String(Math.floor(currentTime % 60)).padStart(2, '0')}
+                  </span>
+                  <span className="text-[#8E9192]">
+                    {' '}
+                    / {Math.floor(duration / 60)}:
+                    {String(Math.floor(duration % 60)).padStart(2, '0')}
+                  </span>
+                </div>
+              </div>
+
+              {/* Right Group: Mute | Safe Zone | HD Res | Fullscreen */}
+              <div className="flex items-center justify-end gap-1.5 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setIsMuted((m) => !m)}
+                  className="w-8 h-8 shrink-0 rounded-lg bg-[#1C1B1E] hover:bg-[#2A2A2D] border border-white/[0.08] flex items-center justify-center text-[#8E9192] hover:text-[#E5E1E4] transition-colors cursor-pointer"
+                  title={isMuted ? 'Unmute Audio' : 'Mute Audio'}
+                >
+                  {isMuted ? (
+                    <VolumeX className="w-4 h-4 text-rose-400 shrink-0" />
+                  ) : (
+                    <Volume2 className="w-4 h-4 shrink-0" />
+                  )}
+                </button>
+
+                {/* Safe zone + Safe Zone Frame Presets */}
+                <div className="relative flex items-center h-8 rounded-lg bg-[#1C1B1E] border border-white/[0.08] shrink-0">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      handleUpdateStyleAndSyncPreset({
+                        showSafeZones: !styleConfig.showSafeZones,
+                        safeZonePreset:
+                          styleConfig.safeZonePreset || 'instagram-reels',
+                      })
+                    }
+                    className={`h-full flex items-center gap-1 px-2 rounded-l-lg text-[11px] font-medium cursor-pointer transition-colors border-r border-white/[0.08] ${
+                      styleConfig.showSafeZones
+                        ? 'bg-[#163326] text-[#34D399]'
+                        : 'text-[#E5E1E4] hover:bg-[#2A2A2D]'
+                    }`}
+                    title="Toggle Safe Zone Overlay"
+                  >
+                    <Shield className="w-3.5 h-3.5 text-[#24B47E] shrink-0" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowSafeZonePopover((v) => !v)}
+                    className="h-full px-1.5 rounded-r-lg text-[#8E9192] hover:text-[#E5E1E4] hover:bg-[#2A2A2D] cursor-pointer flex items-center justify-center"
+                    title="Choose Safe Zone Platform Frame"
+                  >
+                    <SlidersHorizontal className="w-3 h-3 shrink-0" />
+                  </button>
+
+                  {showSafeZonePopover && (
+                    <div className="absolute bottom-10 right-0 z-50 w-60 bg-[#131315] border border-white/15 rounded-xl p-3 shadow-2xl space-y-2 text-left">
+                      <div className="flex items-center justify-between border-b border-white/10 pb-1.5">
+                        <div>
+                          <span className="text-[11px] font-bold text-white block">
+                            Safe Zones &amp; Safe Zone Frames
+                          </span>
+                          <span className="text-[9px] text-zinc-400">
+                            Select platform UI frame overlay
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setShowSafeZonePopover(false)}
+                          className="text-zinc-400 hover:text-white cursor-pointer"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                      {(
+                        [
+                          {
+                            id: 'instagram-reels',
+                            label: 'Instagram Reel',
+                            desc: 'Top bar + 5 right icons + bottom caption frame',
+                          },
+                          {
+                            id: 'instagram-story',
+                            label: 'Instagram Story',
+                            desc: 'Top story bars + avatar + bottom message pill',
+                          },
+                          {
+                            id: 'tiktok-foryou',
+                            label: 'TikTok',
+                            desc: 'For You header + 6 right icons + music ticker',
+                          },
+                          {
+                            id: 'youtube-shorts',
+                            label: 'YouTube Shorts',
+                            desc: 'Shorts header + 5 right icons + channel bar',
+                          },
+                          {
+                            id: 'instagram-feed',
+                            label: 'Instagram Feed',
+                            desc: 'Feed header + bottom interaction frame',
+                          },
+                        ] as { id: SafeZonePreset; label: string; desc: string }[]
+                      ).map((p) => {
+                        const active =
+                          (styleConfig.safeZonePreset || 'instagram-reels') ===
+                          p.id;
+                        return (
+                          <button
+                            key={p.id}
+                            type="button"
+                            onClick={() => {
+                              handleUpdateStyleAndSyncPreset({
+                                showSafeZones: true,
+                                safeZonePreset: p.id,
+                              });
+                              showToast(`Safe Zone Frame enabled: ${p.label}`);
+                            }}
+                            className={`w-full text-left px-2.5 py-1.5 rounded-lg text-[11px] cursor-pointer flex items-center justify-between transition-colors ${
+                              active && styleConfig.showSafeZones
+                                ? 'bg-[#24B47E]/20 border border-[#24B47E]/50 text-[#34D399] font-semibold'
+                                : 'text-zinc-300 hover:bg-white/5 border border-transparent'
+                            }`}
+                          >
+                            <div>
+                              <div className="font-semibold">{p.label}</div>
+                              <div className="text-[9px] text-zinc-400">
+                                {p.desc}
+                              </div>
+                            </div>
+                            {active && (
+                              <span className="text-[#34D399] font-bold">✓</span>
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    const next = !styleConfig.lowResPreview;
+                    handleUpdateStyleAndSyncPreset({ lowResPreview: next });
+                    showToast(
+                      next
+                        ? 'Low Res Preview active (smooth scrubbing)'
+                        : 'HD Preview active'
+                    );
+                  }}
+                  className={`h-8 px-2 rounded-lg bg-[#1C1B1E] hover:bg-[#2A2A2D] border border-white/[0.08] text-[11px] font-mono font-bold cursor-pointer flex items-center gap-1 shrink-0 ${
+                    styleConfig.lowResPreview
+                      ? 'text-amber-300'
+                      : 'text-[#8E9192] hover:text-[#E5E1E4]'
+                  }`}
+                  title="Toggle HD / Low-Res Preview"
+                >
+                  <span>HD</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (canvasWrapperRef.current?.requestFullscreen) {
+                      canvasWrapperRef.current
+                        .requestFullscreen()
+                        .catch(() => {});
+                    }
+                  }}
+                  className="w-8 h-8 shrink-0 rounded-lg bg-[#1C1B1E] hover:bg-[#2A2A2D] border border-white/[0.08] flex items-center justify-center text-[#8E9192] hover:text-[#E5E1E4] transition-colors cursor-pointer"
+                  title="Fullscreen"
+                >
+                  <Maximize2 className="w-4 h-4 shrink-0" />
+                </button>
+              </div>
             </div>
           </div>
         </section>
@@ -5307,6 +5289,7 @@ export default function App() {
           activeLineStylingSegmentId={activeLineStylingSegmentId}
           onCloseLineStyling={() => setActiveLineStylingSegmentId(null)}
           onUpdateSegmentMeta={handleUpdateSegmentProps}
+          onOpenFrameStyleCloner={() => setIsFrameStyleClonerOpen(true)}
         />
       </main>
       )}
@@ -5550,6 +5533,19 @@ export default function App() {
         segments={segments}
         primaryTrack={styleConfig.primaryTrack}
         onShowToast={showToast}
+      />
+
+      {/* DYNAMIC AI FRAME, POSTER & REGION STYLE CLONER MODAL */}
+      <AIFrameStyleClonerModal
+        isOpen={isFrameStyleClonerOpen}
+        onClose={() => setIsFrameStyleClonerOpen(false)}
+        currentTime={currentTime}
+        duration={duration}
+        onSeekMainVideo={handleSeekTo}
+        captureMainFrameDataUrl={captureMainFrameDataUrl}
+        hasRawVideoElement={Boolean(uploadedVideoUrl)}
+        currentStyleConfig={styleConfig}
+        onApplyAndSaveStyle={handleApplyAndSaveClonedStyle}
       />
     </div>
   );

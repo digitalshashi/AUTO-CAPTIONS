@@ -909,35 +909,65 @@ function drawInteractiveLayerBoundingBox(
  *   or crisp cream sticker outline when floating directly over raw video.
  */
 /**
- * Splits a CaptionSegment into Line 1 (First Line) and Line 2 (Second Line / Hero Line),
- * honoring any explicit user overrides (`customLine1Text` / `customLine2Text`).
+ * Splits a CaptionSegment into Line 1, Line 2, and optional Line 3,
+ * honoring explicit user overrides (`customLine1Text`, `customLine2Text`, `customLine3Text`)
+ * and `maxLines` (1, 2, or 3).
  */
 export function splitSegmentIntoTwoLines(
-  seg: CaptionSegment,
-  trackKey: import('../types/caption').TrackKey
-): { line1Text: string; line2Text: string } {
+  seg: CaptionSegment | string,
+  trackKey?: import('../types/caption').TrackKey | number,
+  maxLines: number = 2
+): { line1Text: string; line2Text: string; line3Text: string } {
+  if (typeof seg === 'string' || !seg || !seg.tracks) {
+    const rawStr = typeof seg === 'string' ? seg.trim() : '';
+    if (!rawStr) {
+      return { line1Text: '', line2Text: '', line3Text: '' };
+    }
+    const tokens = rawStr.split(/\s+/).filter(Boolean);
+    if (tokens.length <= 1) {
+      return { line1Text: rawStr, line2Text: '', line3Text: '' };
+    }
+    const mid = Math.max(1, Math.ceil(tokens.length / 2));
+    return {
+      line1Text: tokens.slice(0, mid).join(' '),
+      line2Text: tokens.slice(mid).join(' '),
+      line3Text: '',
+    };
+  }
+
+  const resolvedTrackKey: import('../types/caption').TrackKey =
+    typeof trackKey === 'string' ? trackKey : 'tinglish';
   const tr =
-    seg.tracks[trackKey] ||
+    seg.tracks[resolvedTrackKey] ||
     seg.tracks.tinglish ||
     seg.tracks.english ||
     Object.values(seg.tracks)[0];
   const words = tr?.words || [];
-  const enforceRoman = isRomanTrack(trackKey);
+  const enforceRoman = isRomanTrack(resolvedTrackKey);
+  const effectiveLines = seg.maxLines ?? seg.linesCountOverride ?? maxLines ?? 2;
 
-  if (seg.customLine1Text !== undefined || seg.customLine2Text !== undefined) {
+  if (
+    seg.customLine1Text !== undefined ||
+    seg.customLine2Text !== undefined ||
+    seg.customLine3Text !== undefined
+  ) {
     const rawL1 = seg.customLine1Text ?? '';
     const rawL2 = seg.customLine2Text ?? '';
+    const rawL3 = seg.customLine3Text ?? '';
     return {
       line1Text: enforceRoman ? transliterateIndicToRoman(rawL1) : rawL1,
       line2Text: enforceRoman ? transliterateIndicToRoman(rawL2) : rawL2,
+      line3Text: enforceRoman ? transliterateIndicToRoman(rawL3) : rawL3,
     };
   }
 
   if (words.length === 0) {
     const fallbackTxt = tr?.text || '';
+    const cleanTxt = enforceRoman ? transliterateIndicToRoman(fallbackTxt) : fallbackTxt;
     return {
-      line1Text: '',
-      line2Text: enforceRoman ? transliterateIndicToRoman(fallbackTxt) : fallbackTxt,
+      line1Text: effectiveLines === 1 ? cleanTxt : '',
+      line2Text: effectiveLines === 1 ? '' : cleanTxt,
+      line3Text: '',
     };
   }
 
@@ -946,8 +976,27 @@ export function splitSegmentIntoTwoLines(
     word: enforceRoman ? transliterateIndicToRoman(w.word) : w.word,
   }));
 
+  if (effectiveLines === 1) {
+    return {
+      line1Text: cleanWords.map((w) => w.word).join(' '),
+      line2Text: '',
+      line3Text: '',
+    };
+  }
+
+  if (effectiveLines >= 3 && cleanWords.length >= 3) {
+    const n = cleanWords.length;
+    const c1 = Math.max(1, Math.floor(n / 3));
+    const c2 = Math.max(c1 + 1, Math.floor((2 * n) / 3));
+    return {
+      line1Text: cleanWords.slice(0, c1).map((w) => w.word).join(' '),
+      line2Text: cleanWords.slice(c1, c2).map((w) => w.word).join(' '),
+      line3Text: cleanWords.slice(c2).map((w) => w.word).join(' '),
+    };
+  }
+
   if (cleanWords.length === 1) {
-    return { line1Text: '', line2Text: cleanWords[0].word };
+    return { line1Text: '', line2Text: cleanWords[0].word, line3Text: '' };
   }
 
   const heroIndices: number[] = [];
@@ -970,16 +1019,19 @@ export function splitSegmentIntoTwoLines(
         return {
           line1Text: cleanWords.slice(0, splitIdx).map((w) => w.word).join(' '),
           line2Text: cleanWords.slice(splitIdx).map((w) => w.word).join(' '),
+          line3Text: '',
         };
       }
       return {
         line1Text: candidateTop.join(' '),
         line2Text: candidateBottom.join(' '),
+        line3Text: '',
       };
     } else if (lastHero < cleanWords.length - 1) {
       return {
         line1Text: cleanWords.slice(0, lastHero + 1).map((w) => w.word).join(' '),
         line2Text: cleanWords.slice(lastHero + 1).map((w) => w.word).join(' '),
+        line3Text: '',
       };
     }
   }
@@ -988,7 +1040,277 @@ export function splitSegmentIntoTwoLines(
   return {
     line1Text: cleanWords.slice(0, splitIdx).map((w) => w.word).join(' '),
     line2Text: cleanWords.slice(splitIdx).map((w) => w.word).join(' '),
+    line3Text: '',
   };
+}
+
+/**
+ * Creates an animated metallic/gold/emerald specular shimmer gradient for words or lines with `isShine: true`.
+ */
+function createWordShineGradient(
+  ctx: CanvasRenderingContext2D,
+  fontSize: number,
+  currentTime: number,
+  wordWidth: number,
+  accentColor = '#FDE047'
+): CanvasGradient {
+  const halfW = Math.max(24, wordWidth / 2);
+  const halfH = Math.max(16, fontSize * 0.55);
+  const grad = ctx.createLinearGradient(-halfW, -halfH, halfW, halfH);
+  const sweep = ((currentTime * 1.35) % 1 + 1) % 1;
+  const bandStart = Math.max(0.05, Math.min(0.65, sweep * 0.7));
+  const bandMid = Math.min(0.85, bandStart + 0.15);
+  const bandEnd = Math.min(0.96, bandMid + 0.15);
+
+  grad.addColorStop(0, accentColor);
+  grad.addColorStop(bandStart, '#FDE047');
+  grad.addColorStop(bandMid, '#FFFFFF');
+  grad.addColorStop(bandEnd, '#6EE7B7');
+  grad.addColorStop(1, accentColor);
+  return grad;
+}
+
+/**
+ * Draws a crisp 4-point sparkle star glint on words with `isShine: true`.
+ */
+function drawWordShineSparkle(
+  ctx: CanvasRenderingContext2D,
+  wordWidth: number,
+  fontSize: number,
+  currentTime: number
+) {
+  ctx.save();
+  const pulse = 0.55 + 0.45 * Math.abs(Math.sin(currentTime * 6.5));
+  const sx = wordWidth * 0.44;
+  const sy = -fontSize * 0.36;
+  const arm = Math.max(4, fontSize * 0.15) * pulse;
+  ctx.strokeStyle = `rgba(255, 253, 220, ${0.92 * pulse})`;
+  ctx.fillStyle = `rgba(253, 224, 71, ${0.95 * pulse})`;
+  ctx.lineWidth = 1.8;
+  ctx.shadowColor = '#FDE047';
+  ctx.shadowBlur = 10;
+  ctx.beginPath();
+  ctx.moveTo(sx - arm, sy);
+  ctx.lineTo(sx + arm, sy);
+  ctx.moveTo(sx, sy - arm);
+  ctx.lineTo(sx, sy + arm);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(sx, sy, Math.max(1.5, arm * 0.28), 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+/**
+ * Maps custom line strings back to WordTiming objects while preserving existing per-word styles (isBold, isItalic, isShine, customColor, customScale, isUnderlined).
+ */
+function matchWordsWithStyles(
+  lineTokens: string[],
+  sourceWords: WordTiming[],
+  startIndexOffset: number,
+  defaultIsHero: boolean,
+  segStart: number,
+  segEnd: number,
+  totalCount: number
+): WordTiming[] {
+  const usedIndices = new Set<number>();
+  const dur = Math.max(0.25, segEnd - segStart);
+  const step = dur / Math.max(1, totalCount);
+
+  return lineTokens.map((tok, localIdx) => {
+    const globalIdx = startIndexOffset + localIdx;
+    const cleanTok = tok.replace(/[*!?,.:;'"()]/g, '').toLowerCase();
+    let matched: WordTiming | undefined = sourceWords[globalIdx];
+    if (!matched || matched.word.replace(/[*!?,.:;'"()]/g, '').toLowerCase() !== cleanTok) {
+      const foundIdx = sourceWords.findIndex(
+        (sw, sIdx) =>
+          !usedIndices.has(sIdx) &&
+          sw.word.replace(/[*!?,.:;'"()]/g, '').toLowerCase() === cleanTok
+      );
+      if (foundIdx !== -1) {
+        matched = sourceWords[foundIdx];
+        usedIndices.add(foundIdx);
+      }
+    } else {
+      usedIndices.add(globalIdx);
+    }
+
+    return {
+      ...(matched || {}),
+      word: tok,
+      startTime: matched?.startTime ?? segStart + globalIdx * step,
+      endTime: matched?.endTime ?? segStart + (globalIdx + 1) * step,
+      isHero: matched?.isHero !== undefined ? matched.isHero : defaultIsHero,
+    };
+  });
+}
+
+/**
+ * Renders a line of WordTiming tokens with full support for per-word & per-line Bold, Italic, Shine, Scale, Underline, and Color.
+ */
+function drawRichWordTokensOnLine(params: {
+  ctx: CanvasRenderingContext2D;
+  lineWords: WordTiming[];
+  anchorX: number;
+  lineY: number;
+  baseFontSize: number;
+  fontFamily: string;
+  baseWeight: number;
+  letterSpace: number;
+  wordGap: number;
+  textTransform: CaptionStyleConfig['textTransform'];
+  defaultFill: string | CanvasGradient;
+  strokeColor: string;
+  strokeWidth: number;
+  hasPaperCard: boolean;
+  currentTime: number;
+  style: CaptionStyleConfig;
+  lineBold?: boolean;
+  lineItalic?: boolean;
+  lineShine?: boolean;
+  lineColor?: string;
+}) {
+  const {
+    ctx,
+    lineWords,
+    anchorX,
+    lineY,
+    baseFontSize,
+    fontFamily,
+    baseWeight,
+    letterSpace,
+    wordGap,
+    textTransform,
+    defaultFill,
+    strokeColor,
+    strokeWidth,
+    hasPaperCard,
+    currentTime,
+    style,
+    lineBold,
+    lineItalic,
+    lineShine,
+    lineColor,
+  } = params;
+
+  if (lineWords.length === 0) return { totalWidth: 0 };
+
+  const measured = lineWords.map((w) => {
+    const isWordBold = Boolean(w.isBold || lineBold);
+    const isWordItalic = Boolean(w.isItalic || lineItalic || style.italicText);
+    const isWordShine = Boolean(w.isShine || lineShine);
+    const wordScale = Math.max(0.5, Math.min(2.5, (w.customScale ?? 1) * (isWordBold ? 1.05 : 1)));
+    const fSize = Math.max(16, Math.round(baseFontSize * wordScale));
+    const fWeight = isWordBold ? 900 : baseWeight;
+    const fStyle = isWordItalic ? 'italic ' : '';
+    const chosenFont = w.customFontFamily || fontFamily;
+    const display = transformWord(w.word, textTransform || 'none');
+
+    ctx.font = `${fStyle}${fWeight} ${fSize}px ${getWordFontStack(chosenFont)}`;
+    applyCanvasLetterSpacing(ctx, letterSpace);
+    const width = ctx.measureText(display).width;
+    return {
+      raw: w,
+      display,
+      width,
+      fSize,
+      fWeight,
+      fStyle,
+      chosenFont,
+      isWordBold,
+      isWordItalic,
+      isWordShine,
+    };
+  });
+
+  const totalWidth =
+    measured.reduce((acc, m) => acc + m.width, 0) +
+    Math.max(0, measured.length - 1) * wordGap;
+
+  let cursorX = anchorX - totalWidth / 2;
+
+  measured.forEach((m) => {
+    const wordCenterX = cursorX + m.width / 2;
+    ctx.save();
+    ctx.translate(wordCenterX, lineY);
+    ctx.font = `${m.fStyle}${m.fWeight} ${m.fSize}px ${getWordFontStack(m.chosenFont)}`;
+    applyCanvasLetterSpacing(ctx, letterSpace);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    if (style.depth3DEnabled) {
+      const depthPx = Math.max(2, Math.min(20, style.depth3DDepth ?? 6));
+      const angleRad = ((style.depth3DAngle ?? 135) * Math.PI) / 180;
+      const dx3d = Math.cos(angleRad);
+      const dy3d = Math.sin(angleRad);
+      ctx.save();
+      ctx.fillStyle = style.depth3DColor || style.highlightColor || '#EB4823';
+      for (let d = depthPx; d >= 1; d -= 1.5) {
+        ctx.fillText(m.display, dx3d * d, dy3d * d);
+      }
+      ctx.restore();
+    }
+
+    if (!hasPaperCard && strokeWidth > 0) {
+      ctx.lineJoin = 'round';
+      ctx.miterLimit = 2;
+      ctx.lineWidth = m.isWordBold ? Math.round(strokeWidth * 1.18) : strokeWidth;
+      ctx.strokeStyle = strokeColor;
+      ctx.shadowColor = 'rgba(0, 0, 0, 0.8)';
+      ctx.shadowBlur = 14;
+      ctx.strokeText(m.display, 0, 0);
+      ctx.shadowBlur = 0;
+    } else if (style.strokeWidth > 0) {
+      ctx.lineJoin = 'round';
+      ctx.lineWidth = m.isWordBold ? Math.round(style.strokeWidth * 1.18) : style.strokeWidth;
+      ctx.strokeStyle = style.strokeColor || '#000000';
+      ctx.strokeText(m.display, 0, 0);
+    }
+
+    if (m.isWordShine) {
+      ctx.shadowColor = '#FDE047';
+      ctx.shadowBlur = Math.max(22, (style.glowSpread || 16) * 1.35);
+    } else if (style.glowEnabled) {
+      ctx.shadowColor = style.glowColor || style.highlightColor || '#FDE047';
+      ctx.shadowBlur = style.glowSpread || 16;
+    }
+
+    if (m.isWordShine) {
+      ctx.fillStyle = createWordShineGradient(
+        ctx,
+        m.fSize,
+        currentTime,
+        m.width,
+        m.raw.customColor || lineColor || style.highlightColor || '#FDE047'
+      );
+    } else if (m.raw.customColor) {
+      ctx.fillStyle = m.raw.customColor;
+    } else if (lineColor) {
+      ctx.fillStyle = lineColor;
+    } else {
+      ctx.fillStyle = defaultFill;
+    }
+
+    ctx.fillText(m.display, 0, 0);
+
+    if (m.raw.isUnderlined) {
+      ctx.beginPath();
+      ctx.strokeStyle = ctx.fillStyle;
+      ctx.lineWidth = Math.max(2, m.fSize * 0.07);
+      ctx.moveTo(-m.width / 2, m.fSize * 0.45);
+      ctx.lineTo(m.width / 2, m.fSize * 0.45);
+      ctx.stroke();
+    }
+
+    if (m.isWordShine) {
+      drawWordShineSparkle(ctx, m.width, m.fSize, currentTime);
+    }
+
+    ctx.restore();
+    cursorX += m.width + wordGap;
+  });
+
+  return { totalWidth };
 }
 
 function renderLalaHandwrittenCaption(
@@ -1002,9 +1324,10 @@ function renderLalaHandwrittenCaption(
   style: CaptionStyleConfig,
   isExportRender = false,
   customLine1Text?: string,
-  customLine2Text?: string
+  customLine2Text?: string,
+  customLine3Text?: string
 ) {
-  if (words.length === 0 && !customLine1Text && !customLine2Text) return;
+  if (words.length === 0 && !customLine1Text && !customLine2Text && !customLine3Text) return;
   ctx.save();
 
   const segElapsed = Math.max(0, currentTime - segStart);
@@ -1019,17 +1342,56 @@ function renderLalaHandwrittenCaption(
   );
   const entranceSpring = 0.94 + 0.06 * Math.sin(entranceProgress * (Math.PI / 2));
 
-  // Partition words into Top Small Handwritten Line and Bottom Giant Handwritten Hero Line
-  let topWords: string[] = [];
-  let heroWords: string[] = [];
+  const targetLinesCount = style.maxLinesPerCaption ?? 2;
 
-  if (customLine1Text !== undefined || customLine2Text !== undefined) {
-    topWords = (customLine1Text ?? '').trim().split(/\s+/).filter(Boolean);
-    heroWords = (customLine2Text ?? '').trim().split(/\s+/).filter(Boolean);
-    if (heroWords.length === 0 && topWords.length > 0) {
-      heroWords = topWords;
-      topWords = [];
+  // Partition words into Top Small Handwritten Line, Bottom Giant Handwritten Hero Line, and optional Line 3
+  let topWordObjs: WordTiming[] = [];
+  let heroWordObjs: WordTiming[] = [];
+  let line3WordObjs: WordTiming[] = [];
+
+  if (
+    customLine1Text !== undefined ||
+    customLine2Text !== undefined ||
+    customLine3Text !== undefined
+  ) {
+    const l1Tokens = (customLine1Text ?? '').trim().split(/\s+/).filter(Boolean);
+    const l2Tokens = (customLine2Text ?? '').trim().split(/\s+/).filter(Boolean);
+    const l3Tokens = (customLine3Text ?? '').trim().split(/\s+/).filter(Boolean);
+    const totalToks = l1Tokens.length + l2Tokens.length + l3Tokens.length;
+
+    topWordObjs = matchWordsWithStyles(l1Tokens, words, 0, false, segStart, segEnd, totalToks);
+    heroWordObjs = matchWordsWithStyles(
+      l2Tokens,
+      words,
+      l1Tokens.length,
+      true,
+      segStart,
+      segEnd,
+      totalToks
+    );
+    line3WordObjs = matchWordsWithStyles(
+      l3Tokens,
+      words,
+      l1Tokens.length + l2Tokens.length,
+      false,
+      segStart,
+      segEnd,
+      totalToks
+    );
+
+    if (heroWordObjs.length === 0 && topWordObjs.length > 0 && targetLinesCount === 1) {
+      heroWordObjs = topWordObjs;
+      topWordObjs = [];
     }
+  } else if (targetLinesCount === 1) {
+    topWordObjs = [];
+    heroWordObjs = words;
+  } else if (targetLinesCount >= 3 && words.length >= 3) {
+    const c1 = Math.max(1, Math.floor(words.length / 3));
+    const c2 = Math.max(c1 + 1, Math.floor((2 * words.length) / 3));
+    topWordObjs = words.slice(0, c1);
+    heroWordObjs = words.slice(c1, c2);
+    line3WordObjs = words.slice(c2);
   } else {
     const heroIndices: number[] = [];
     words.forEach((w, idx) => {
@@ -1037,40 +1399,44 @@ function renderLalaHandwrittenCaption(
     });
 
     if (words.length === 1) {
-      topWords = [];
-      heroWords = [words[0].word];
+      topWordObjs = [];
+      heroWordObjs = [words[0]];
     } else if (heroIndices.length > 0) {
       const firstHero = heroIndices[0];
       const lastHero = heroIndices[heroIndices.length - 1];
       if (firstHero > 0) {
-        const candidateTop = words.slice(0, firstHero).map((w) => w.word);
-        const candidateBottom = words.slice(firstHero).map((w) => w.word);
+        const candidateTop = words.slice(0, firstHero);
+        const candidateBottom = words.slice(firstHero);
         if (
           words.length >= 3 &&
           candidateBottom.length === 1 &&
-          candidateBottom[0].replace(/[^a-zA-Z0-9]/g, '').length <= 2
+          candidateBottom[0].word.replace(/[^a-zA-Z0-9]/g, '').length <= 2
         ) {
           const splitIdx = Math.max(1, Math.floor(words.length / 2));
-          topWords = words.slice(0, splitIdx).map((w) => w.word);
-          heroWords = words.slice(splitIdx).map((w) => w.word);
+          topWordObjs = words.slice(0, splitIdx);
+          heroWordObjs = words.slice(splitIdx);
         } else {
-          topWords = candidateTop;
-          heroWords = candidateBottom;
+          topWordObjs = candidateTop;
+          heroWordObjs = candidateBottom;
         }
       } else if (lastHero < words.length - 1) {
-        topWords = words.slice(0, lastHero + 1).map((w) => w.word);
-        heroWords = words.slice(lastHero + 1).map((w) => w.word);
+        topWordObjs = words.slice(0, lastHero + 1);
+        heroWordObjs = words.slice(lastHero + 1);
       } else {
         const splitIdx = Math.max(1, Math.floor(words.length / 2));
-        topWords = words.slice(0, splitIdx).map((w) => w.word);
-        heroWords = words.slice(splitIdx).map((w) => w.word);
+        topWordObjs = words.slice(0, splitIdx);
+        heroWordObjs = words.slice(splitIdx);
       }
     } else {
       const splitIdx = Math.max(1, Math.floor(words.length / 2));
-      topWords = words.slice(0, splitIdx).map((w) => w.word);
-      heroWords = words.slice(splitIdx).map((w) => w.word);
+      topWordObjs = words.slice(0, splitIdx);
+      heroWordObjs = words.slice(splitIdx);
     }
   }
+
+  const topWords = topWordObjs.map((w) => w.word);
+  const heroWords = heroWordObjs.map((w) => w.word);
+  const line3Words = line3WordObjs.map((w) => w.word);
 
   const baseCenterX = ((style.positionX ?? 50) / 100) * canvasWidth;
   const baseCenterY = ((style.positionY ?? 68) / 100) * canvasHeight;
@@ -1082,16 +1448,22 @@ function renderLalaHandwrittenCaption(
   const effectiveBaseFontSize = Math.round((style.fontSize || 48) * aspectFontScale);
 
   const smallFontSize = Math.max(
-    22,
+    18,
     style.line1FontSizePx
       ? Math.round(style.line1FontSizePx * aspectFontScale)
       : Math.round(effectiveBaseFontSize * (style.smallWordScale || 0.78))
   );
   const rawBigFontSize = Math.max(
-    36,
+    22,
     style.line2FontSizePx
       ? Math.round(style.line2FontSizePx * aspectFontScale)
       : Math.round(effectiveBaseFontSize * (style.bigWordScale || 1.95))
+  );
+  const line3FontSize = Math.max(
+    18,
+    style.line3FontSizePx
+      ? Math.round(style.line3FontSizePx * aspectFontScale)
+      : smallFontSize
   );
 
   const trans = computeTransitionTransform(currentTime, segStart, segEnd, style);
@@ -1105,6 +1477,10 @@ function renderLalaHandwrittenCaption(
     heroWords.join(' '),
     style.textTransform || 'none'
   );
+  const rawLine3Text = transformWord(
+    line3Words.join(' '),
+    style.textTransform || 'none'
+  );
 
   // Measure and fit Giant Bottom Line within 88% of canvas width
   ctx.font = `${weight} ${rawBigFontSize}px ${getWordFontStack(lalaHeroFontFamily)}`;
@@ -1115,7 +1491,7 @@ function renderLalaHandwrittenCaption(
     measuredRawBigW > maxAllowedW
       ? Math.max(0.42, maxAllowedW / measuredRawBigW)
       : 1;
-  const bigFontSize = Math.max(24, Math.round(rawBigFontSize * fitRatio));
+  const bigFontSize = Math.max(20, Math.round(rawBigFontSize * fitRatio));
 
   ctx.font = `${weight} ${bigFontSize}px ${getWordFontStack(lalaHeroFontFamily)}`;
   const bigTextWidth = Math.min(maxAllowedW, ctx.measureText(rawBottomText).width);
@@ -1123,6 +1499,11 @@ function renderLalaHandwrittenCaption(
   ctx.font = `${Math.max(500, weight - 100)} ${smallFontSize}px ${getWordFontStack(lalaFontFamily)}`;
   const topTextWidth = topText
     ? Math.min(maxAllowedW, ctx.measureText(topText).width)
+    : 0;
+
+  ctx.font = `${Math.max(500, weight - 100)} ${line3FontSize}px ${getWordFontStack(lalaFontFamily)}`;
+  const line3TextWidth = rawLine3Text
+    ? Math.min(maxAllowedW, ctx.measureText(rawLine3Text).width)
     : 0;
 
   const small1OffsetX = ((style.smallOffsetX ?? 0) / 100) * canvasWidth;
@@ -1151,12 +1532,15 @@ function renderLalaHandwrittenCaption(
   const smallAlign = style.smallTextAlign || style.bigTextAlign || 'center';
   const bigAlign = style.bigTextAlign || 'center';
 
-  const contentWidth = Math.max(bigTextWidth, topTextWidth, 210);
+  const contentWidth = Math.max(bigTextWidth, topTextWidth, line3TextWidth, 210);
   const topY = topText
     ? centerY - bigFontSize * 0.56 - smallFontSize * 0.35 - vertGap * 0.5 + small1OffsetY
     : centerY;
   const bigY = topText ? centerY + smallFontSize * 0.16 : centerY;
-  const swooshY = bigY + bigFontSize * 0.42;
+  const line3Y = rawLine3Text
+    ? bigY + bigFontSize * 0.58 + line3FontSize * 0.42 + vertGap * 0.5
+    : bigY;
+  const swooshY = (rawLine3Text ? line3Y + line3FontSize * 0.4 : bigY + bigFontSize * 0.42);
 
   ctx.globalAlpha = trans.alpha;
 
@@ -1166,7 +1550,7 @@ function renderLalaHandwrittenCaption(
     centerX,
     centerY,
     contentWidth,
-    bigFontSize + smallFontSize + Math.abs(vertGap),
+    bigFontSize + smallFontSize + (rawLine3Text ? line3FontSize : 0) + Math.abs(vertGap),
     style
   );
 
@@ -1223,8 +1607,8 @@ function renderLalaHandwrittenCaption(
     ctx.restore();
   }
 
-  // 2. Render Top Line
-  if (topText) {
+  // 2. Render Top Line (Line 1) with full per-word and per-line Bold, Italic, Shine, Scale, and Color support
+  if (topWordObjs.length > 0) {
     ctx.save();
     const topAnchorX =
       smallAlign === 'left'
@@ -1235,36 +1619,33 @@ function renderLalaHandwrittenCaption(
     ctx.translate(topAnchorX, topY);
     if (trans.rotationRad !== 0) ctx.rotate(trans.rotationRad);
     ctx.scale(entranceSpring * trans.scaleX, entranceSpring * trans.scaleY);
-    ctx.font = `${Math.max(500, weight - 100)} ${smallFontSize}px ${getWordFontStack(lalaFontFamily)}`;
-    applyCanvasLetterSpacing(ctx, letterSpace * 0.5);
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
 
-    if (!hasPaperCard) {
-      ctx.lineJoin = 'round';
-      ctx.miterLimit = 2;
-      ctx.lineWidth = Math.max(4, style.strokeWidth || smallFontSize * 0.16);
-      ctx.strokeStyle = style.strokeWidth > 0 ? style.strokeColor : '#FAF6E8';
-      ctx.shadowColor = 'rgba(0, 0, 0, 0.75)';
-      ctx.shadowBlur = 12;
-      ctx.strokeText(topText, 0, 0);
-      ctx.shadowBlur = 0;
-    } else if (style.strokeWidth > 0) {
-      ctx.lineJoin = 'round';
-      ctx.lineWidth = style.strokeWidth;
-      ctx.strokeStyle = style.strokeColor || '#000000';
-      ctx.strokeText(topText, 0, 0);
-    }
-
-    if (style.glowEnabled) {
-      ctx.shadowColor = style.glowColor || swooshColor;
-      ctx.shadowBlur = style.glowSpread || 16;
-    }
-
-    ctx.fillStyle = style.useBaseGradient
+    const topDefaultFill = style.useBaseGradient
       ? createBaseTextFill(ctx, smallFontSize, currentTime, style, topTextWidth)
       : inkColor;
-    ctx.fillText(topText, 0, 0);
+
+    drawRichWordTokensOnLine({
+      ctx,
+      lineWords: topWordObjs,
+      anchorX: 0,
+      lineY: 0,
+      baseFontSize: smallFontSize,
+      fontFamily: lalaFontFamily,
+      baseWeight: Math.max(500, weight - 100),
+      letterSpace: letterSpace * 0.5,
+      wordGap: Math.max(6, smallFontSize * 0.22),
+      textTransform: style.textTransform || 'none',
+      defaultFill: topDefaultFill,
+      strokeColor: style.strokeWidth > 0 ? style.strokeColor : '#FAF6E8',
+      strokeWidth: Math.max(4, style.strokeWidth || smallFontSize * 0.16),
+      hasPaperCard,
+      currentTime,
+      style,
+      lineBold: style.line1Bold,
+      lineItalic: style.line1Italic,
+      lineShine: style.line1Shine,
+      lineColor: style.line1Color,
+    });
     ctx.restore();
 
     const hitSmall: import('../types/caption').LayerHitBox = {
@@ -1279,7 +1660,7 @@ function renderLalaHandwrittenCaption(
     latestRenderedLayerHitBoxes.push(hitSmall);
   }
 
-  // 3. Render Bottom Giant Hero Line
+  // 3. Render Bottom Giant Hero Line (Line 2) with full per-word and per-line Bold, Italic, Shine, Scale, and Color support
   const isHeroSpoken = words.some(
     (w) => currentTime >= w.startTime && currentTime <= w.endTime + 0.1
   );
@@ -1294,66 +1675,77 @@ function renderLalaHandwrittenCaption(
       ? centerX + contentWidth / 2 - bigTextWidth / 2
       : centerX;
 
-  ctx.save();
-  ctx.translate(bigAnchorX, bigY);
-  if (trans.rotationRad !== 0) ctx.rotate(trans.rotationRad);
-  ctx.scale(
-    entranceSpring * heroBounce * trans.scaleX,
-    entranceSpring * heroBounce * trans.scaleY
-  );
-  ctx.font = `${weight} ${bigFontSize}px ${getWordFontStack(lalaHeroFontFamily)}`;
-  applyCanvasLetterSpacing(ctx, letterSpace);
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-
-  if (style.depth3DEnabled) {
-    const depthPx = Math.max(2, Math.min(20, style.depth3DDepth ?? 6));
-    const angleRad = ((style.depth3DAngle ?? 135) * Math.PI) / 180;
-    const dx3d = Math.cos(angleRad);
-    const dy3d = Math.sin(angleRad);
+  if (heroWordObjs.length > 0) {
     ctx.save();
-    ctx.fillStyle = style.depth3DColor || swooshColor;
-    for (let d = depthPx; d >= 1; d -= 1.5) {
-      ctx.fillText(rawBottomText, dx3d * d, dy3d * d);
-    }
+    ctx.translate(bigAnchorX, bigY);
+    if (trans.rotationRad !== 0) ctx.rotate(trans.rotationRad);
+    ctx.scale(
+      entranceSpring * heroBounce * trans.scaleX,
+      entranceSpring * heroBounce * trans.scaleY
+    );
+
+    const heroDefaultFill = style.useGradient
+      ? createSidzVerticalGradient(ctx, bigFontSize, currentTime, style, bigTextWidth)
+      : style.emphasisMode === 'spotlight'
+      ? swooshColor
+      : inkColor;
+
+    drawRichWordTokensOnLine({
+      ctx,
+      lineWords: heroWordObjs,
+      anchorX: 0,
+      lineY: 0,
+      baseFontSize: bigFontSize,
+      fontFamily: lalaHeroFontFamily,
+      baseWeight: weight,
+      letterSpace,
+      wordGap: Math.max(8, bigFontSize * 0.22),
+      textTransform: style.textTransform || 'none',
+      defaultFill: heroDefaultFill,
+      strokeColor: style.strokeWidth > 0 ? style.strokeColor : '#FAF6E8',
+      strokeWidth: Math.max(6, style.strokeWidth || bigFontSize * 0.15),
+      hasPaperCard,
+      currentTime,
+      style,
+      lineBold: style.line2Bold,
+      lineItalic: style.line2Italic,
+      lineShine: style.line2Shine,
+      lineColor: style.line2Color,
+    });
     ctx.restore();
   }
 
-  if (!hasPaperCard) {
-    ctx.lineJoin = 'round';
-    ctx.miterLimit = 2;
-    ctx.lineWidth = Math.max(6, style.strokeWidth || bigFontSize * 0.15);
-    ctx.strokeStyle = style.strokeWidth > 0 ? style.strokeColor : '#FAF6E8';
-    ctx.shadowColor = 'rgba(0, 0, 0, 0.8)';
-    ctx.shadowBlur = 16;
-    ctx.strokeText(rawBottomText, 0, 0);
-    ctx.shadowBlur = 0;
-  } else if (style.strokeWidth > 0) {
-    ctx.lineJoin = 'round';
-    ctx.lineWidth = style.strokeWidth;
-    ctx.strokeStyle = style.strokeColor || '#000000';
-    ctx.strokeText(rawBottomText, 0, 0);
-  }
+  // 3.5 Optional Line 3 (when 3 lines are enabled)
+  if (line3WordObjs.length > 0) {
+    ctx.save();
+    ctx.translate(centerX, line3Y);
+    if (trans.rotationRad !== 0) ctx.rotate(trans.rotationRad);
+    ctx.scale(entranceSpring * trans.scaleX, entranceSpring * trans.scaleY);
 
-  if (style.glowEnabled) {
-    ctx.shadowColor = style.glowColor || swooshColor;
-    ctx.shadowBlur = style.glowSpread || 18;
-  }
-
-  if (style.useGradient) {
-    ctx.fillStyle = createSidzVerticalGradient(
+    drawRichWordTokensOnLine({
       ctx,
-      bigFontSize,
+      lineWords: line3WordObjs,
+      anchorX: 0,
+      lineY: 0,
+      baseFontSize: line3FontSize,
+      fontFamily: lalaFontFamily,
+      baseWeight: Math.max(500, weight - 100),
+      letterSpace: letterSpace * 0.5,
+      wordGap: Math.max(6, line3FontSize * 0.22),
+      textTransform: style.textTransform || 'none',
+      defaultFill: inkColor,
+      strokeColor: style.strokeWidth > 0 ? style.strokeColor : '#FAF6E8',
+      strokeWidth: Math.max(4, style.strokeWidth || line3FontSize * 0.15),
+      hasPaperCard,
       currentTime,
       style,
-      bigTextWidth
-    );
-  } else {
-    ctx.fillStyle =
-      style.emphasisMode === 'spotlight' ? swooshColor : inkColor;
+      lineBold: style.line3Bold,
+      lineItalic: style.line3Italic,
+      lineShine: style.line3Shine,
+      lineColor: style.line3Color,
+    });
+    ctx.restore();
   }
-  ctx.fillText(rawBottomText, 0, 0);
-  ctx.restore();
 
   // 4. Render Hand-Drawn Marker Underline Swoosh
   if (style.underlineText !== false) {
@@ -1451,9 +1843,11 @@ function renderSidzCompositeCaption(
   style: CaptionStyleConfig,
   isExportRender = false,
   customLine1Text?: string,
-  customLine2Text?: string
+  customLine2Text?: string,
+  customLine3Text?: string,
+  segmentMaxLines?: 1 | 2 | 3
 ) {
-  if (words.length === 0 && !customLine1Text && !customLine2Text) return;
+  if (words.length === 0 && !customLine1Text && !customLine2Text && !customLine3Text) return;
   ctx.save();
 
   const segElapsed = Math.max(0, currentTime - segStart);
@@ -1461,7 +1855,12 @@ function renderSidzCompositeCaption(
   const entranceProgress = Math.min(1, segElapsed / (0.22 / Math.max(0.5, style.animationSpeed)));
   const entranceSpring = 0.92 + 0.08 * Math.sin(entranceProgress * (Math.PI / 2));
 
-  // Partition segment words into Small Line 1, Small Line 2, and Big Hero Words
+  const effectiveMaxLines: 1 | 2 | 3 =
+    segmentMaxLines ??
+    style.maxLines ??
+    (customLine3Text && customLine3Text.trim().length > 0 ? 3 : 2);
+
+  // Partition segment words into Small Line 1, Big Hero Line 2, and Small Line 3 (with WordTiming preservation)
   const heroIndices: number[] = [];
   words.forEach((w, idx) => {
     if (w.isHero) heroIndices.push(idx);
@@ -1482,54 +1881,114 @@ function renderSidzCompositeCaption(
   const firstHeroIdx = heroIndices[0] ?? 0;
   const lastHeroIdx = heroIndices[heroIndices.length - 1] ?? Math.max(0, words.length - 1);
 
-  let smallLine1Words: string[] = [];
-  let smallLine2Words: string[] = [];
-  let heroWords: string[] = [];
+  const buildWordObjsForCustomTokens = (
+    tokens: string[],
+    startIdxOffset: number,
+    totalCount: number,
+    defaultHero: boolean
+  ): WordTiming[] => {
+    const dur = Math.max(0.25, segEnd - segStart);
+    const step = dur / Math.max(1, totalCount);
+    return tokens.map((tok, i) => {
+      const globalIdx = startIdxOffset + i;
+      const existing =
+        words[globalIdx] ||
+        words.find((w) => w.word.toLowerCase() === tok.toLowerCase());
+      return {
+        ...(existing || {}),
+        word: tok,
+        startTime: existing?.startTime ?? segStart + globalIdx * step,
+        endTime: existing?.endTime ?? segStart + (globalIdx + 1) * step,
+        isHero: existing?.isHero ?? defaultHero,
+      };
+    });
+  };
 
-  if (customLine1Text !== undefined || customLine2Text !== undefined) {
-    smallLine1Words = (customLine1Text ?? '').trim().split(/\s+/).filter(Boolean);
-    smallLine2Words = [];
-    heroWords = (customLine2Text ?? '').trim().split(/\s+/).filter(Boolean);
-    if (heroWords.length === 0 && smallLine1Words.length > 0) {
-      heroWords = smallLine1Words;
-      smallLine1Words = [];
+  let smallLine1WordObjs: WordTiming[] = [];
+  let heroWordObjs: WordTiming[] = [];
+  let smallLine2WordObjs: WordTiming[] = [];
+
+  if (
+    customLine1Text !== undefined ||
+    customLine2Text !== undefined ||
+    customLine3Text !== undefined
+  ) {
+    const t1 = (customLine1Text ?? '').trim().split(/\s+/).filter(Boolean);
+    const t2 = (customLine2Text ?? '').trim().split(/\s+/).filter(Boolean);
+    const t3 = (customLine3Text ?? '').trim().split(/\s+/).filter(Boolean);
+    const totalToks = Math.max(1, t1.length + t2.length + t3.length);
+
+    if (effectiveMaxLines === 1) {
+      const merged = [...t1, ...t2, ...t3];
+      heroWordObjs = buildWordObjsForCustomTokens(merged, 0, merged.length, true);
+    } else if (effectiveMaxLines === 3) {
+      smallLine1WordObjs = buildWordObjsForCustomTokens(t1, 0, totalToks, false);
+      heroWordObjs = buildWordObjsForCustomTokens(t2, t1.length, totalToks, true);
+      smallLine2WordObjs = buildWordObjsForCustomTokens(
+        t3,
+        t1.length + t2.length,
+        totalToks,
+        false
+      );
+    } else {
+      smallLine1WordObjs = buildWordObjsForCustomTokens(t1, 0, totalToks, false);
+      heroWordObjs = buildWordObjsForCustomTokens(
+        [...t2, ...t3],
+        t1.length,
+        totalToks,
+        true
+      );
+      if (heroWordObjs.length === 0 && smallLine1WordObjs.length > 0) {
+        heroWordObjs = smallLine1WordObjs;
+        smallLine1WordObjs = [];
+      }
     }
+  } else if (effectiveMaxLines === 1) {
+    heroWordObjs = words;
+  } else if (effectiveMaxLines === 3 && words.length >= 3) {
+    const c1 = Math.max(1, Math.round(words.length / 3));
+    const c2 = Math.max(c1 + 1, Math.round((words.length * 2) / 3));
+    smallLine1WordObjs = words.slice(0, c1);
+    heroWordObjs = words.slice(c1, c2);
+    smallLine2WordObjs = words.slice(c2);
   } else {
-    let leadWords = words.slice(0, firstHeroIdx).map((w) => w.word);
-    heroWords = words.slice(firstHeroIdx, lastHeroIdx + 1).map((w) => w.word);
-    let tailWords = words.slice(lastHeroIdx + 1).map((w) => w.word);
+    let leadWords = words.slice(0, firstHeroIdx);
+    heroWordObjs = words.slice(firstHeroIdx, lastHeroIdx + 1);
+    let tailWords = words.slice(lastHeroIdx + 1);
 
     if (style.hierarchyMode === 'sidz-truly-flame') {
       if (leadWords.length > 0 && tailWords.length === 0) {
         const splitAt = Math.min(2, Math.max(1, Math.floor(words.length / 2)));
-        heroWords = words.slice(0, splitAt).map((w) => w.word);
-        tailWords = words.slice(splitAt).map((w) => w.word);
+        heroWordObjs = words.slice(0, splitAt);
+        tailWords = words.slice(splitAt);
         leadWords = [];
-      } else if (tailWords.length === 0 && heroWords.length > 1) {
-        tailWords = heroWords.slice(1);
-        heroWords = [heroWords[0]];
+      } else if (tailWords.length === 0 && heroWordObjs.length > 1) {
+        tailWords = heroWordObjs.slice(1);
+        heroWordObjs = [heroWordObjs[0]];
       }
     } else {
       if (leadWords.length === 0 && tailWords.length > 0 && style.hierarchyMode !== 'sidz-20k-script') {
-        leadWords = heroWords;
-        heroWords = tailWords;
+        leadWords = heroWordObjs;
+        heroWordObjs = tailWords;
         tailWords = [];
       }
     }
 
-    // Default to clean 2-Line layout (Line 1 = all small words on a single crisp line, Line 2 = Hero words)
-    // Only split small words into 2 sub-lines if there are >= 5 small words AND two-line-split is explicitly requested
     const twoLineMode = style.smallTwoLineMode || 'single-line';
     const combinedSmall = [...leadWords, ...tailWords];
     if (twoLineMode === 'two-line-split' && combinedSmall.length >= 5) {
       const mid = Math.ceil(combinedSmall.length / 2);
-      smallLine1Words = combinedSmall.slice(0, mid);
-      smallLine2Words = combinedSmall.slice(mid);
+      smallLine1WordObjs = combinedSmall.slice(0, mid);
+      smallLine2WordObjs = combinedSmall.slice(mid);
     } else {
-      smallLine1Words = combinedSmall;
-      smallLine2Words = [];
+      smallLine1WordObjs = combinedSmall;
+      smallLine2WordObjs = [];
     }
   }
+
+  const smallLine1Words = smallLine1WordObjs.map((w) => w.word);
+  const heroWords = heroWordObjs.map((w) => w.word);
+  const smallLine2Words = smallLine2WordObjs.map((w) => w.word);
 
   const baseCenterX = ((style.positionX ?? 50) / 100) * canvasWidth;
   const baseCenterY = ((style.positionY ?? 66) / 100) * canvasHeight;
@@ -1543,14 +2002,16 @@ function renderSidzCompositeCaption(
   const effectiveBaseFontSize = Math.round(style.fontSize * aspectFontScale);
 
   const small1FontSize = Math.max(
-    24,
+    18,
     style.line1FontSizePx
       ? Math.round(style.line1FontSizePx * aspectFontScale)
       : Math.round(effectiveBaseFontSize * Math.max(0.68, style.smallWordScale || 0.76))
   );
   const small2FontSize = Math.max(
-    24,
-    style.line1FontSizePx
+    18,
+    style.line3FontSizePx
+      ? Math.round(style.line3FontSizePx * aspectFontScale)
+      : style.line1FontSizePx
       ? Math.round(style.line1FontSizePx * aspectFontScale)
       : Math.round(
           effectiveBaseFontSize *
@@ -1558,15 +2019,15 @@ function renderSidzCompositeCaption(
         )
   );
   const rawGiantFontSize = Math.max(
-    36,
+    22,
     style.line2FontSizePx
       ? Math.round(style.line2FontSizePx * aspectFontScale)
       : Math.round(effectiveBaseFontSize * (style.bigWordScale || 1.95))
   );
 
-  const isHeroCurrentlySpoken = words
-    .slice(firstHeroIdx, lastHeroIdx + 1)
-    .some((w) => currentTime >= w.startTime && currentTime <= w.endTime + 0.15);
+  const isHeroCurrentlySpoken = heroWordObjs.some(
+    (w) => currentTime >= w.startTime && currentTime <= w.endTime + 0.15
+  );
   const heroPopScale = isHeroCurrentlySpoken
     ? 1.0 + 0.045 * Math.sin(((currentTime - segStart) / segDuration) * Math.PI * 2)
     : 1.0;
@@ -1613,7 +2074,6 @@ function renderSidzCompositeCaption(
   applyCanvasLetterSpacing(ctx, letterSpace * 0.6);
   const small2Width = small2Text ? ctx.measureText(small2Text).width : 0;
 
-  // Determine default alignments per SIDZ preset, overridden by user's individual alignment settings
   const defaultSmall1Align: 'left' | 'center' | 'right' =
     style.hierarchyMode === 'sidz-valuing-wide' ? 'center' : 'center';
   const defaultSmall2Align: 'left' | 'center' | 'right' =
@@ -1626,14 +2086,15 @@ function renderSidzCompositeCaption(
   const bigAlign = style.bigTextAlign || 'center';
 
   const defaultOrder =
-    style.hierarchyMode === 'sidz-truly-flame'
+    effectiveMaxLines === 3
+      ? 'small1-big-small2'
+      : style.hierarchyMode === 'sidz-truly-flame'
       ? 'big-small1-small2'
       : 'small1-small2-big';
-  const lineOrder = style.lineOrderMode || defaultOrder;
+  const lineOrder = effectiveMaxLines === 3 ? 'small1-big-small2' : style.lineOrderMode || defaultOrder;
 
   const cleanGap = Math.max(6, vertGap);
 
-  // Compute baseline Y positions for each of the layers with generous non-overlapping clearance!
   let baseSmall1Y = baseCenterY - giantVisualHeight * 0.62 - small1FontSize * 0.65 - cleanGap;
   let baseSmall2Y = baseCenterY + giantVisualHeight * 0.58 + small2FontSize * 0.55 + cleanGap;
   let baseBigY = baseCenterY;
@@ -1661,7 +2122,6 @@ function renderSidzCompositeCaption(
     baseSmall2Y = baseBigY + giantVisualHeight * 0.58 + small2FontSize * 0.55 + cleanGap;
   }
 
-  // Apply individual X/Y percentage offsets
   const small1OffsetX = ((style.smallOffsetX ?? 0) / 100) * canvasWidth;
   const small1OffsetY = ((style.smallOffsetY ?? 0) / 100) * canvasHeight;
   const small2OffsetX = ((style.smallLine2OffsetX ?? 0) / 100) * canvasWidth;
@@ -1672,7 +2132,6 @@ function renderSidzCompositeCaption(
   const trans = computeTransitionTransform(currentTime, segStart, segEnd, style);
   ctx.globalAlpha = trans.alpha;
 
-  // Compute Big Hero X anchor & allow free placement across the screen
   const blockHalfSpan = Math.max(giantWidth / 2, 90);
   const rawBigAnchorX =
     bigAlign === 'left'
@@ -1697,7 +2156,6 @@ function renderSidzCompositeCaption(
     Math.min(canvasHeight * 0.96, baseBigY + bigOffsetY + trans.dy)
   );
 
-  // Optional background pill/card if enabled by user
   const totalStackH =
     giantVisualHeight +
     (small1Text ? small1FontSize * 1.3 : 0) +
@@ -1725,7 +2183,6 @@ function renderSidzCompositeCaption(
     ctx.restore();
   }
 
-  // Optional dynamic Instagram / Premiere frame that follows the caption block
   drawCaptionDynamicFrame(
     ctx,
     finalBigCenterX,
@@ -1736,7 +2193,7 @@ function renderSidzCompositeCaption(
   );
 
   // 1. Draw Small Line 1 (if present)
-  if (small1Text) {
+  if (smallLine1WordObjs.length > 0 && small1Text) {
     const rawSmall1X =
       small1Align === 'left'
         ? finalBigCenterX - giantWidth / 2 + 4 + small1OffsetX
@@ -1754,17 +2211,59 @@ function renderSidzCompositeCaption(
       Math.min(canvasHeight - 18, baseSmall1Y + small1OffsetY + trans.dy)
     );
 
-    drawChromaticSmallPhrase(
-      ctx,
-      small1Text,
-      clampedSmall1X,
-      finalSmall1Y,
-      small1FontSize,
-      style.fontFamily,
-      small1Align,
-      style.primaryColor,
-      letterSpace * 0.6
-    );
+    const hasCustomWordOrLineStyle1 =
+      Boolean(style.line1Bold || style.line1Italic || style.line1Shine || style.line1Color) ||
+      smallLine1WordObjs.some(
+        (w) =>
+          w.isBold !== undefined ||
+          w.isItalic !== undefined ||
+          w.isShine ||
+          w.customColor ||
+          (w.scaleMultiplier && w.scaleMultiplier !== 1)
+      );
+
+    if (hasCustomWordOrLineStyle1) {
+      const centerLine1X =
+        small1Align === 'left'
+          ? clampedSmall1X + small1Width / 2
+          : small1Align === 'right'
+          ? clampedSmall1X - small1Width / 2
+          : clampedSmall1X;
+      drawRichWordTokensOnLine({
+        ctx,
+        lineWords: smallLine1WordObjs,
+        anchorX: centerLine1X,
+        lineY: finalSmall1Y,
+        baseFontSize: small1FontSize,
+        fontFamily: style.fontFamily,
+        baseWeight: 700,
+        letterSpace: letterSpace * 0.6,
+        wordGap: Math.max(6, horizGap * 0.75),
+        textTransform: style.textTransform || 'none',
+        defaultFill: style.line1Color || style.primaryColor,
+        strokeColor: 'rgba(0, 0, 0, 0.92)',
+        strokeWidth: Math.max(2.5, small1FontSize * 0.12),
+        hasPaperCard: false,
+        currentTime,
+        style,
+        lineBold: style.line1Bold,
+        lineItalic: style.line1Italic,
+        lineShine: style.line1Shine,
+        lineColor: style.line1Color,
+      });
+    } else {
+      drawChromaticSmallPhrase(
+        ctx,
+        small1Text,
+        clampedSmall1X,
+        finalSmall1Y,
+        small1FontSize,
+        style.fontFamily,
+        small1Align,
+        style.line1Color || style.primaryColor,
+        letterSpace * 0.6
+      );
+    }
 
     const boxLeft =
       small1Align === 'left'
@@ -1793,7 +2292,7 @@ function renderSidzCompositeCaption(
     }
   }
 
-  // 2. Draw GIANT Hero Word(s)
+  // 2. Draw GIANT Hero Word(s) (Line 2) with per-word and per-line Bold, Italic, Shine, Scale, and Color support
   ctx.save();
   ctx.translate(finalBigCenterX, finalBigCenterY);
   if (trans.rotationRad !== 0) ctx.rotate(trans.rotationRad);
@@ -1801,67 +2300,113 @@ function renderSidzCompositeCaption(
     entranceSpring * heroPopScale * trans.scaleX,
     entranceSpring * heroPopScale * verticalStretch * trans.scaleY
   );
-  ctx.font = `${style.fontWeight} ${giantFontSize}px ${getWordFontStack(style.heroWordFontFamily)}`;
-  applyCanvasLetterSpacing(ctx, letterSpace);
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
 
-  if (style.depth3DEnabled) {
-    const depthPx = Math.max(2, Math.min(20, style.depth3DDepth ?? 8));
-    const angleRad = ((style.depth3DAngle ?? 135) * Math.PI) / 180;
-    const dx3d = Math.cos(angleRad);
-    const dy3d = Math.sin(angleRad);
-    ctx.save();
-    ctx.fillStyle = style.depth3DColor || style.highlightColor || '#FF5722';
-    for (let d = depthPx; d >= 1; d -= 1.5) {
-      ctx.fillText(heroText, dx3d * d, dy3d * d);
+  const hasPerWordHeroOverrides = heroWordObjs.some(
+    (w) =>
+      w.isBold !== undefined ||
+      w.isItalic !== undefined ||
+      w.isShine ||
+      w.customColor ||
+      w.isUnderlined ||
+      (w.scaleMultiplier && w.scaleMultiplier !== 1)
+  );
+
+  if (
+    hasPerWordHeroOverrides ||
+    style.line2Bold !== undefined ||
+    style.line2Italic !== undefined ||
+    style.line2Shine ||
+    style.line2Color
+  ) {
+    const heroDefaultFill = style.line2Color
+      ? style.line2Color
+      : createSidzVerticalGradient(ctx, giantFontSize, currentTime, style, giantWidth);
+    drawRichWordTokensOnLine({
+      ctx,
+      lineWords: heroWordObjs,
+      anchorX: 0,
+      lineY: 0,
+      baseFontSize: giantFontSize,
+      fontFamily: style.heroWordFontFamily || style.fontFamily,
+      baseWeight: style.fontWeight || 800,
+      letterSpace,
+      wordGap: Math.max(8, horizGap),
+      textTransform:
+        style.hierarchyMode === 'sidz-truly-flame' && style.textTransform === 'none'
+          ? 'lowercase'
+          : style.textTransform || 'none',
+      defaultFill: heroDefaultFill,
+      strokeColor: style.strokeColor || 'rgba(5, 5, 10, 0.92)',
+      strokeWidth: Math.max(2.5, style.strokeWidth || 3),
+      hasPaperCard: false,
+      currentTime,
+      style,
+      lineBold: style.line2Bold,
+      lineItalic: style.line2Italic,
+      lineShine: style.line2Shine,
+      lineColor: style.line2Color,
+    });
+  } else {
+    const heroItalicPrefix = style.italicText ? 'italic ' : '';
+    ctx.font = `${heroItalicPrefix}${style.fontWeight} ${giantFontSize}px ${getWordFontStack(style.heroWordFontFamily)}`;
+    applyCanvasLetterSpacing(ctx, letterSpace);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    if (style.depth3DEnabled) {
+      const depthPx = Math.max(2, Math.min(20, style.depth3DDepth ?? 8));
+      const angleRad = ((style.depth3DAngle ?? 135) * Math.PI) / 180;
+      const dx3d = Math.cos(angleRad);
+      const dy3d = Math.sin(angleRad);
+      ctx.save();
+      ctx.fillStyle = style.depth3DColor || style.highlightColor || '#FF5722';
+      for (let d = depthPx; d >= 1; d -= 1.5) {
+        ctx.fillText(heroText, dx3d * d, dy3d * d);
+      }
+      ctx.restore();
     }
-    ctx.restore();
-  }
 
-  // Pass A: Soft colored luminous aura glow (when glowEnabled)
-  if (style.glowEnabled ?? true) {
-    ctx.save();
-    ctx.shadowColor = hexToRgba(
-      style.glowColor || style.gradientMid || style.highlightColor || '#FDE047',
-      0.65
-    );
-    ctx.shadowBlur = Math.max(18, style.glowSpread || style.shadowBlur * 1.2);
-    ctx.shadowOffsetX = 0;
-    ctx.shadowOffsetY = 0;
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+    if (style.glowEnabled ?? true) {
+      ctx.save();
+      ctx.shadowColor = hexToRgba(
+        style.glowColor || style.gradientMid || style.highlightColor || '#FDE047',
+        0.65
+      );
+      ctx.shadowBlur = Math.max(18, style.glowSpread || style.shadowBlur * 1.2);
+      ctx.shadowOffsetX = 0;
+      ctx.shadowOffsetY = 0;
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+      ctx.fillText(heroText, 0, 0);
+      ctx.restore();
+    }
+
+    if ((style.dropShadowEnabled ?? true) || style.strokeWidth > 0) {
+      ctx.save();
+      if (style.dropShadowEnabled ?? true) {
+        ctx.shadowColor = style.dropShadowColor || 'rgba(0, 0, 0, 0.92)';
+        ctx.shadowBlur = style.shadowBlur ?? 20;
+        ctx.shadowOffsetX = style.dropShadowX ?? 0;
+        ctx.shadowOffsetY = style.dropShadowY ?? 5;
+      }
+      ctx.lineJoin = 'round';
+      ctx.miterLimit = 2;
+      ctx.lineWidth = Math.max(2.5, style.strokeWidth || 3);
+      ctx.strokeStyle = style.strokeColor || 'rgba(5, 5, 10, 0.92)';
+      ctx.strokeText(heroText, 0, 0);
+      ctx.restore();
+    }
+
+    ctx.fillStyle = createSidzVerticalGradient(ctx, giantFontSize, currentTime, style, giantWidth);
     ctx.fillText(heroText, 0, 0);
-    ctx.restore();
-  }
 
-  // Pass B: Deep dark ambient drop shadow + crisp dark edge
-  if ((style.dropShadowEnabled ?? true) || style.strokeWidth > 0) {
-    ctx.save();
-    if (style.dropShadowEnabled ?? true) {
-      ctx.shadowColor = style.dropShadowColor || 'rgba(0, 0, 0, 0.92)';
-      ctx.shadowBlur = style.shadowBlur ?? 20;
-      ctx.shadowOffsetX = style.dropShadowX ?? 0;
-      ctx.shadowOffsetY = style.dropShadowY ?? 5;
+    if (style.underlineText) {
+      ctx.beginPath();
+      ctx.strokeStyle = ctx.fillStyle;
+      ctx.lineWidth = Math.max(2.5, giantFontSize * 0.065);
+      ctx.moveTo(-giantWidth / 2, giantFontSize * 0.46);
+      ctx.lineTo(giantWidth / 2, giantFontSize * 0.46);
+      ctx.stroke();
     }
-    ctx.lineJoin = 'round';
-    ctx.miterLimit = 2;
-    ctx.lineWidth = Math.max(2.5, style.strokeWidth || 3);
-    ctx.strokeStyle = style.strokeColor || 'rgba(5, 5, 10, 0.92)';
-    ctx.strokeText(heroText, 0, 0);
-    ctx.restore();
-  }
-
-  // Pass C: Multi-Stop Vertical/Angled Luminous Gradient Fill OR Solid Highlight Color
-  ctx.fillStyle = createSidzVerticalGradient(ctx, giantFontSize, currentTime, style, giantWidth);
-  ctx.fillText(heroText, 0, 0);
-
-  if (style.underlineText) {
-    ctx.beginPath();
-    ctx.strokeStyle = ctx.fillStyle;
-    ctx.lineWidth = Math.max(2.5, giantFontSize * 0.065);
-    ctx.moveTo(-giantWidth / 2, giantFontSize * 0.46);
-    ctx.lineTo(giantWidth / 2, giantFontSize * 0.46);
-    ctx.stroke();
   }
   ctx.restore();
 
@@ -1885,8 +2430,8 @@ function renderSidzCompositeCaption(
     );
   }
 
-  // 3. Draw Small Line 2 or Overlapping Script Tail (if present)
-  if (small2Text) {
+  // 3. Draw Small Line 2 / Line 3 or Overlapping Script Tail (if present)
+  if (smallLine2WordObjs.length > 0 && small2Text) {
     const rawSmall2X =
       small2Align === 'left'
         ? finalBigCenterX - giantWidth / 2 + 4 + small2OffsetX
@@ -1904,7 +2449,47 @@ function renderSidzCompositeCaption(
       Math.min(canvasHeight - 24, baseSmall2Y + small2OffsetY)
     );
 
-    if (style.hierarchyMode === 'sidz-20k-script' && style.smallTwoLineMode !== 'two-line-split') {
+    const hasCustomWordOrLineStyle3 =
+      Boolean(style.line3Bold || style.line3Italic || style.line3Shine || style.line3Color) ||
+      smallLine2WordObjs.some(
+        (w) =>
+          w.isBold !== undefined ||
+          w.isItalic !== undefined ||
+          w.isShine ||
+          w.customColor ||
+          (w.scaleMultiplier && w.scaleMultiplier !== 1)
+      );
+
+    if (hasCustomWordOrLineStyle3) {
+      const centerLine3X =
+        small2Align === 'left'
+          ? clampedSmall2X + small2Width / 2
+          : small2Align === 'right'
+          ? clampedSmall2X - small2Width / 2
+          : clampedSmall2X;
+      drawRichWordTokensOnLine({
+        ctx,
+        lineWords: smallLine2WordObjs,
+        anchorX: centerLine3X,
+        lineY: finalSmall2Y,
+        baseFontSize: small2FontSize,
+        fontFamily: style.fontFamily,
+        baseWeight: 700,
+        letterSpace: letterSpace * 0.6,
+        wordGap: Math.max(6, horizGap * 0.75),
+        textTransform: style.textTransform || 'none',
+        defaultFill: style.line3Color || style.primaryColor,
+        strokeColor: 'rgba(0, 0, 0, 0.92)',
+        strokeWidth: Math.max(2.5, small2FontSize * 0.12),
+        hasPaperCard: false,
+        currentTime,
+        style,
+        lineBold: style.line3Bold,
+        lineItalic: style.line3Italic,
+        lineShine: style.line3Shine,
+        lineColor: style.line3Color,
+      });
+    } else if (style.hierarchyMode === 'sidz-20k-script' && style.smallTwoLineMode !== 'two-line-split') {
       const scriptFontSize = Math.max(18, Math.round(small2FontSize * 1.28));
       drawSidzScriptTailPhrase(
         ctx,
@@ -1924,7 +2509,7 @@ function renderSidzCompositeCaption(
         small2FontSize,
         style.fontFamily,
         small2Align,
-        style.primaryColor,
+        style.line3Color || style.primaryColor,
         letterSpace * 0.6
       );
     }
@@ -3010,6 +3595,36 @@ export function renderReelCanvasFrame(params: {
           activeSegment.line2FontSizePx ??
           override?.line2FontSizePx ??
           style.line2FontSizePx,
+        line3FontSizePx:
+          activeSegment.line3FontSizePx ??
+          override?.line3FontSizePx ??
+          style.line3FontSizePx,
+        line1Bold:
+          activeSegment.line1Bold ?? override?.line1Bold ?? style.line1Bold,
+        line1Italic:
+          activeSegment.line1Italic ?? override?.line1Italic ?? style.line1Italic,
+        line1Shine:
+          activeSegment.line1Shine ?? override?.line1Shine ?? style.line1Shine,
+        line1Color:
+          activeSegment.line1Color ?? override?.line1Color ?? style.line1Color,
+        line2Bold:
+          activeSegment.line2Bold ?? override?.line2Bold ?? style.line2Bold,
+        line2Italic:
+          activeSegment.line2Italic ?? override?.line2Italic ?? style.line2Italic,
+        line2Shine:
+          activeSegment.line2Shine ?? override?.line2Shine ?? style.line2Shine,
+        line2Color:
+          activeSegment.line2Color ?? override?.line2Color ?? style.line2Color,
+        line3Bold:
+          activeSegment.line3Bold ?? override?.line3Bold ?? style.line3Bold,
+        line3Italic:
+          activeSegment.line3Italic ?? override?.line3Italic ?? style.line3Italic,
+        line3Shine:
+          activeSegment.line3Shine ?? override?.line3Shine ?? style.line3Shine,
+        line3Color:
+          activeSegment.line3Color ?? override?.line3Color ?? style.line3Color,
+        maxLines:
+          activeSegment.maxLines ?? override?.maxLines ?? style.maxLines,
         primaryColor: override?.primaryColor || style.primaryColor,
         highlightColor: override?.secondaryColor || style.highlightColor,
         positionX: override?.positionX ?? style.positionX,
@@ -3022,11 +3637,15 @@ export function renderReelCanvasFrame(params: {
               : 0
             : style.backgroundOpacity,
         arcEnabled:
-          Boolean(activeSegment.arcCurveDeg) || Boolean(style.arcEnabled),
+          activeSegment.arcCurveDeg !== undefined
+            ? activeSegment.arcCurveDeg !== 0
+            : Boolean(style.arcEnabled && style.arcCurveDeg),
         arcCurveDeg:
           activeSegment.arcCurveDeg !== undefined
             ? activeSegment.arcCurveDeg
-            : style.arcCurveDeg,
+            : style.arcEnabled
+            ? style.arcCurveDeg || 0
+            : 0,
         horizontalSpacing: activeSegment.spreadWords
           ? Math.max(28, (style.horizontalSpacing || 12) * 2.4)
           : style.horizontalSpacing,
@@ -3065,6 +3684,12 @@ export function renderReelCanvasFrame(params: {
         activeSegment.customLine2Text !== undefined
           ? sanitizeCanvasString(activeSegment.customLine2Text)
           : undefined;
+      const customL3 =
+        activeSegment.customLine3Text !== undefined
+          ? sanitizeCanvasString(activeSegment.customLine3Text)
+          : undefined;
+      const segMaxLines =
+        activeSegment.maxLines ?? override?.maxLines ?? style.maxLines;
 
       const isLalaMode =
         depthAdjustedStyle.hierarchyMode === 'lala-handwritten' ||
@@ -3088,7 +3713,9 @@ export function renderReelCanvasFrame(params: {
           depthAdjustedStyle,
           isExportRender,
           customL1,
-          customL2
+          customL2,
+          customL3,
+          segMaxLines
         );
       } else if (
         isSidzMode &&
@@ -3106,7 +3733,9 @@ export function renderReelCanvasFrame(params: {
           depthAdjustedStyle,
           isExportRender,
           customL1,
-          customL2
+          customL2,
+          customL3,
+          segMaxLines
         );
       } else {
         renderAnimatedPrimaryCaption(
@@ -3120,7 +3749,9 @@ export function renderReelCanvasFrame(params: {
           depthAdjustedStyle,
           isExportRender,
           customL1,
-          customL2
+          customL2,
+          customL3,
+          segMaxLines
         );
       }
     }
@@ -3224,8 +3855,12 @@ interface MeasuredWordToken {
   width: number;
   fontSize: number;
   fontFamily: string;
+  fontWeight: number;
+  isItalic: boolean;
+  isShine: boolean;
   isBigHero: boolean;
   localIdx: number;
+  assignedLineIndex?: number;
 }
 
 function renderAnimatedPrimaryCaption(
@@ -3239,25 +3874,79 @@ function renderAnimatedPrimaryCaption(
   style: CaptionStyleConfig,
   isExportRender = false,
   customLine1Text?: string,
-  customLine2Text?: string
+  customLine2Text?: string,
+  customLine3Text?: string,
+  segmentMaxLines?: 1 | 2 | 3
 ) {
   ctx.save();
 
-  let effectiveWords = words;
-  if (customLine1Text !== undefined || customLine2Text !== undefined) {
+  const hasCustomLineTexts =
+    customLine1Text !== undefined ||
+    customLine2Text !== undefined ||
+    customLine3Text !== undefined;
+  const effectiveMaxLines: 1 | 2 | 3 | undefined =
+    segmentMaxLines ??
+    style.maxLines ??
+    (customLine3Text && customLine3Text.trim().length > 0 ? 3 : undefined);
+
+  let effectiveWords: (WordTiming & { _assignedLine?: number })[] = words.map((w) => ({
+    ...w,
+  }));
+
+  if (hasCustomLineTexts) {
     const l1Tokens = (customLine1Text ?? '').trim().split(/\s+/).filter(Boolean);
     const l2Tokens = (customLine2Text ?? '').trim().split(/\s+/).filter(Boolean);
-    const allCustomTokens = [...l1Tokens, ...l2Tokens];
-    if (allCustomTokens.length > 0) {
+    const l3Tokens = (customLine3Text ?? '').trim().split(/\s+/).filter(Boolean);
+    const allGroups =
+      effectiveMaxLines === 1
+        ? [[...l1Tokens, ...l2Tokens, ...l3Tokens]]
+        : effectiveMaxLines === 3
+        ? [l1Tokens, l2Tokens, l3Tokens]
+        : [l1Tokens, [...l2Tokens, ...l3Tokens]];
+
+    const flatEntries: { text: string; lineIdx: number; isHeroLine: boolean }[] = [];
+    allGroups.forEach((grp, gIdx) => {
+      grp.forEach((tok) => {
+        flatEntries.push({
+          text: tok,
+          lineIdx: gIdx,
+          isHeroLine: allGroups.length === 1 || gIdx === 1,
+        });
+      });
+    });
+
+    if (flatEntries.length > 0) {
       const segDur = Math.max(0.25, _segEnd - segStart);
-      const step = segDur / allCustomTokens.length;
-      effectiveWords = allCustomTokens.map((wText, idx) => ({
-        word: wText,
-        startTime: segStart + idx * step,
-        endTime: segStart + (idx + 1) * step,
-        isHero: idx >= l1Tokens.length || l1Tokens.length === 0,
-      }));
+      const step = segDur / flatEntries.length;
+      effectiveWords = flatEntries.map((entry, idx) => {
+        const existing =
+          words[idx] ||
+          words.find((w) => w.word.toLowerCase() === entry.text.toLowerCase());
+        return {
+          ...(existing || {}),
+          word: entry.text,
+          startTime: existing?.startTime ?? segStart + idx * step,
+          endTime: existing?.endTime ?? segStart + (idx + 1) * step,
+          isHero: existing?.isHero ?? entry.isHeroLine,
+          _assignedLine: entry.lineIdx,
+        };
+      });
     }
+  } else if (effectiveMaxLines === 1) {
+    effectiveWords = words.map((w) => ({ ...w, _assignedLine: 0 }));
+  } else if (effectiveMaxLines === 2 && words.length >= 2) {
+    const splitPt = Math.max(1, Math.floor(words.length / 2));
+    effectiveWords = words.map((w, idx) => ({
+      ...w,
+      _assignedLine: idx < splitPt ? 0 : 1,
+    }));
+  } else if (effectiveMaxLines === 3 && words.length >= 3) {
+    const c1 = Math.max(1, Math.round(words.length / 3));
+    const c2 = Math.max(c1 + 1, Math.round((words.length * 2) / 3));
+    effectiveWords = words.map((w, idx) => ({
+      ...w,
+      _assignedLine: idx < c1 ? 0 : idx < c2 ? 1 : 2,
+    }));
   }
 
   let activeWordIdx = effectiveWords.findIndex(
@@ -3272,12 +3961,14 @@ function renderAnimatedPrimaryCaption(
   }
 
   const configuredWordsPerLine =
-    style.wordsPerLine && style.wordsPerLine > 0
+    hasCustomLineTexts || effectiveMaxLines !== undefined
+      ? Math.max(1, effectiveWords.length)
+      : style.wordsPerLine && style.wordsPerLine > 0
       ? style.wordsPerLine
       : Math.max(1, effectiveWords.length);
 
   const chunkSize =
-    style.animationType === 'stomp'
+    style.animationType === 'stomp' && !hasCustomLineTexts && effectiveMaxLines === undefined
       ? Math.min(2, configuredWordsPerLine)
       : Math.max(1, configuredWordsPerLine);
 
@@ -3305,6 +3996,7 @@ function renderAnimatedPrimaryCaption(
     const isSpoken = idx === localActiveIdx;
     const isHeroWord = hasExplicitHeroInPage ? Boolean(w.isHero) : idx === fallbackHeroLocalIdx;
     const isMixedScale = style.hierarchyMode !== 'uniform';
+    const assignedLine = w._assignedLine;
 
     const useBigScale =
       isMixedScale && (isHeroWord || (style.animationType === 'premiere-pro' && isSpoken));
@@ -3314,27 +4006,88 @@ function renderAnimatedPrimaryCaption(
         : Math.max(0.68, style.smallWordScale || 0.75)
       : 1.0;
 
-    const explicitPx = useBigScale ? style.line2FontSizePx : style.line1FontSizePx;
-    let computedFontSize = explicitPx
-      ? Math.round(explicitPx * aspectFontScale)
-      : Math.round(style.fontSize * aspectFontScale * scaleFactor);
+    const lineExplicitPx =
+      assignedLine === 0
+        ? style.line1FontSizePx
+        : assignedLine === 1
+        ? style.line2FontSizePx
+        : assignedLine === 2
+        ? style.line3FontSizePx
+        : useBigScale
+        ? style.line2FontSizePx
+        : style.line1FontSizePx;
+
+    const wordScaleMult = Math.max(0.45, Math.min(2.5, w.scaleMultiplier ?? 1));
+    let computedFontSize = Math.round(
+      (lineExplicitPx
+        ? lineExplicitPx * aspectFontScale
+        : style.fontSize * aspectFontScale * scaleFactor) * wordScaleMult
+    );
+
+    const lineBoldFlag =
+      assignedLine === 0
+        ? style.line1Bold
+        : assignedLine === 1
+        ? style.line2Bold
+        : assignedLine === 2
+        ? style.line3Bold
+        : undefined;
+    const lineItalicFlag =
+      assignedLine === 0
+        ? style.line1Italic
+        : assignedLine === 1
+        ? style.line2Italic
+        : assignedLine === 2
+        ? style.line3Italic
+        : undefined;
+    const lineShineFlag =
+      assignedLine === 0
+        ? style.line1Shine
+        : assignedLine === 1
+        ? style.line2Shine
+        : assignedLine === 2
+        ? style.line3Shine
+        : undefined;
+
+    const isBold =
+      w.isBold !== undefined
+        ? w.isBold
+        : lineBoldFlag !== undefined
+        ? lineBoldFlag
+        : undefined;
+    const tokenWeight =
+      isBold === true
+        ? Math.max(800, style.fontWeight || 700)
+        : isBold === false
+        ? 400
+        : style.fontWeight || 700;
+    const isItalic =
+      w.isItalic !== undefined
+        ? w.isItalic
+        : lineItalicFlag !== undefined
+        ? lineItalicFlag
+        : Boolean(style.italicText);
+    const isShine = Boolean(w.isShine || lineShineFlag);
+
     const chosenFamily =
-      useBigScale && style.heroWordFontFamily ? style.heroWordFontFamily : style.fontFamily;
+      w.customFontFamily ||
+      (useBigScale && style.heroWordFontFamily ? style.heroWordFontFamily : style.fontFamily);
     const effectiveTransform =
       useBigScale && style.emphasisTransform && style.emphasisTransform !== 'none'
         ? style.emphasisTransform
         : style.textTransform;
     const display = transformWord(w.word, effectiveTransform);
 
-    ctx.font = `${style.fontWeight} ${computedFontSize}px ${getWordFontStack(chosenFamily)}`;
+    const italicPrefix = isItalic ? 'italic ' : '';
+    ctx.font = `${italicPrefix}${tokenWeight} ${computedFontSize}px ${getWordFontStack(chosenFamily)}`;
     applyCanvasLetterSpacing(ctx, style.letterSpacing ?? 0);
     let width = ctx.measureText(display).width;
 
     // Auto-fit single long words so they never overflow the horizontal safe zone
     if (width > maxLineWidth) {
       const fitRatio = Math.max(0.45, maxLineWidth / width);
-      computedFontSize = Math.max(20, Math.round(computedFontSize * fitRatio));
-      ctx.font = `${style.fontWeight} ${computedFontSize}px ${getWordFontStack(chosenFamily)}`;
+      computedFontSize = Math.max(18, Math.round(computedFontSize * fitRatio));
+      ctx.font = `${italicPrefix}${tokenWeight} ${computedFontSize}px ${getWordFontStack(chosenFamily)}`;
       applyCanvasLetterSpacing(ctx, style.letterSpacing ?? 0);
       width = ctx.measureText(display).width;
     }
@@ -3345,15 +4098,28 @@ function renderAnimatedPrimaryCaption(
       width,
       fontSize: computedFontSize,
       fontFamily: chosenFamily,
+      fontWeight: tokenWeight,
+      isItalic,
+      isShine,
       isBigHero: useBigScale,
       localIdx: idx,
+      assignedLineIndex: assignedLine,
     };
   });
 
   const baseWordGap = Math.max(4, Number(style.horizontalSpacing ?? style.fontSize * 0.25));
   const lines: MeasuredWordToken[][] = [];
 
-  if (style.hierarchyMode === 'stacked-hero-callout' && tokens.length > 1) {
+  if (tokens.some((t) => t.assignedLineIndex !== undefined)) {
+    const grouped: MeasuredWordToken[][] = [[], [], []];
+    tokens.forEach((t) => {
+      const idx = Math.max(0, Math.min(2, t.assignedLineIndex ?? 0));
+      grouped[idx].push(t);
+    });
+    grouped.forEach((grp) => {
+      if (grp.length > 0) lines.push(grp);
+    });
+  } else if (style.hierarchyMode === 'stacked-hero-callout' && tokens.length > 1) {
     let currentLine: MeasuredWordToken[] = [];
     let currentWidth = 0;
 
@@ -3399,7 +4165,11 @@ function renderAnimatedPrimaryCaption(
   }
 
   // If smallTwoLineMode === 'two-line-split', split any multi-word small line into 2 lines
-  if (style.smallTwoLineMode === 'two-line-split') {
+  if (
+    style.smallTwoLineMode === 'two-line-split' &&
+    !hasCustomLineTexts &&
+    effectiveMaxLines === undefined
+  ) {
     const expandedLines: MeasuredWordToken[][] = [];
     for (const line of lines) {
       const isAllSmall = line.every((t) => !t.isBigHero);
@@ -3413,6 +4183,53 @@ function renderAnimatedPrimaryCaption(
     }
     lines.length = 0;
     lines.push(...expandedLines);
+  }
+
+  // Auto-shrink any line that exceeds maxLineWidth so explicit 1/2/3 line splits always fit cleanly
+  lines.forEach((line) => {
+    const rawLineW =
+      line.reduce((acc, t) => acc + t.width, 0) +
+      Math.max(0, line.length - 1) * baseWordGap;
+    if (rawLineW > maxLineWidth && line.length > 0) {
+      const shrink = Math.max(0.45, maxLineWidth / rawLineW);
+      line.forEach((t) => {
+        t.fontSize = Math.max(16, Math.round(t.fontSize * shrink));
+        const italicPrefix = t.isItalic ? 'italic ' : '';
+        ctx.font = `${italicPrefix}${t.fontWeight} ${t.fontSize}px ${getWordFontStack(t.fontFamily)}`;
+        applyCanvasLetterSpacing(ctx, style.letterSpacing ?? 0);
+        t.width = ctx.measureText(t.display).width;
+      });
+    }
+  });
+
+  const isArcActive = Boolean(
+    style.arcEnabled && style.arcCurveDeg && Math.abs(style.arcCurveDeg) > 0
+  );
+  const arcDeg = isArcActive
+    ? Math.max(-360, Math.min(360, Number(style.arcCurveDeg || 0)))
+    : 0;
+
+  if (isArcActive && Math.abs(arcDeg) >= 75 && tokens.length > 0) {
+    const unifiedFontSize = Math.round(
+      style.fontSize * aspectFontScale * (Math.abs(arcDeg) >= 180 ? 0.92 : 1.0)
+    );
+    const harmonizedTokens = tokens.map((t) => {
+      const targetSize = Math.round(
+        (t.isBigHero ? unifiedFontSize * 1.12 : unifiedFontSize) *
+          Math.max(0.5, Math.min(2.2, t.raw.scaleMultiplier ?? 1))
+      );
+      const italicPrefix = t.isItalic ? 'italic ' : '';
+      ctx.font = `${italicPrefix}${t.fontWeight} ${targetSize}px ${getWordFontStack(t.fontFamily)}`;
+      applyCanvasLetterSpacing(ctx, style.letterSpacing ?? 0);
+      const w = ctx.measureText(t.display).width;
+      return {
+        ...t,
+        fontSize: targetSize,
+        width: w,
+      };
+    });
+    lines.length = 0;
+    lines.push(harmonizedTokens);
   }
 
   const trans = computeTransitionTransform(currentTime, segStart, _segEnd, style);
@@ -3433,7 +4250,6 @@ function renderAnimatedPrimaryCaption(
   );
   const maxRenderedLineWidth = Math.max(...lineWidths, 40);
 
-  // Optional dynamic Instagram / Premiere frame that follows the caption block
   drawCaptionDynamicFrame(
     ctx,
     baseCenterX,
@@ -3443,7 +4259,11 @@ function renderAnimatedPrimaryCaption(
     style
   );
 
-  if (style.backgroundEnabled !== false && style.backgroundOpacity > 0.02) {
+  if (
+    style.backgroundEnabled !== false &&
+    style.backgroundOpacity > 0.02 &&
+    !isArcActive
+  ) {
     const padX = style.backgroundPaddingPx ?? 26;
     const padY = Math.round((style.backgroundPaddingPx ?? 26) * 0.7);
     const boxX = baseCenterX - maxRenderedLineWidth / 2 - padX;
@@ -3478,6 +4298,39 @@ function renderAnimatedPrimaryCaption(
       ? 'small1'
       : 'small2';
 
+    const lineCustomColor =
+      lineIndex === 0
+        ? style.line1Color
+        : lineIndex === 1
+        ? style.line2Color
+        : lineIndex === 2
+        ? style.line3Color
+        : undefined;
+    const lineShineOverride =
+      lineIndex === 0
+        ? style.line1Shine
+        : lineIndex === 1
+        ? style.line2Shine
+        : lineIndex === 2
+        ? style.line3Shine
+        : false;
+    const lineBoldOverride =
+      lineIndex === 0
+        ? style.line1Bold
+        : lineIndex === 1
+        ? style.line2Bold
+        : lineIndex === 2
+        ? style.line3Bold
+        : undefined;
+    const lineItalicOverride =
+      lineIndex === 0
+        ? style.line1Italic
+        : lineIndex === 1
+        ? style.line2Italic
+        : lineIndex === 2
+        ? style.line3Italic
+        : undefined;
+
     const layerAlign =
       layerKey === 'big'
         ? style.bigTextAlign || 'center'
@@ -3510,13 +4363,88 @@ function renderAnimatedPrimaryCaption(
         ? baseCenterX + maxRenderedLineWidth / 2 - lineW + layerOffsetX
         : baseCenterX - lineW / 2 + layerOffsetX;
 
-    // Allow unrestricted horizontal and vertical placement across the screen
     let cursorX = Math.max(
       -lineW * 0.4,
       Math.min(canvasWidth - lineW * 0.6, alignedStartX)
     );
     const lineStartX = cursorX;
     const lineY = Math.max(16, Math.min(canvasHeight - 16, baseLineY + layerOffsetY));
+
+    const absDeg = Math.min(360, Math.max(1, Math.abs(arcDeg)));
+    const thetaTotal = (absDeg * Math.PI) / 180;
+    const halfTheta = thetaTotal / 2;
+    const maxFontInLine = Math.max(...line.map((t) => t.fontSize), style.fontSize);
+    const closingGap =
+      absDeg > 260 ? baseWordGap * 1.8 * ((absDeg - 260) / 100) : 0;
+    const totalArcSpanPx = Math.max(60, lineW + closingGap);
+    const naturalR = totalArcSpanPx / Math.max(0.05, thetaTotal);
+    const minCanvasDim = Math.min(canvasWidth, canvasHeight);
+    const maxR =
+      absDeg >= 165
+        ? minCanvasDim * 0.34
+        : Math.max(
+            minCanvasDim * 0.34,
+            (canvasWidth * 0.42) /
+              Math.max(0.12, Math.sin(Math.min(Math.PI / 2, halfTheta)))
+          );
+    const minR =
+      absDeg >= 240
+        ? Math.max(92, maxFontInLine * 1.55)
+        : Math.max(74, maxFontInLine * 1.2);
+    const circleR = Math.max(minR, Math.min(maxR, naturalR));
+    const arcFontFitScale = isArcActive
+      ? Math.min(1, Math.max(0.45, (circleR * thetaTotal) / totalArcSpanPx))
+      : 1;
+    const arcSagitta = circleR * (1 - Math.cos(Math.min(Math.PI, halfTheta)));
+    const arcCenterX = Math.max(
+      circleR * 0.65,
+      Math.min(canvasWidth - circleR * 0.65, baseCenterX + layerOffsetX)
+    );
+    const arcMidY = Math.max(
+      circleR * 0.65,
+      Math.min(canvasHeight - circleR * 0.65, lineY)
+    );
+    const circleCenterY =
+      arcDeg >= 0
+        ? arcMidY - arcSagitta / 2 + circleR
+        : arcMidY + arcSagitta / 2 - circleR;
+
+    if (
+      isArcActive &&
+      style.backgroundEnabled !== false &&
+      style.backgroundOpacity > 0.02
+    ) {
+      ctx.save();
+      const padY = Math.round((style.backgroundPaddingPx ?? 22) * 0.65);
+      ctx.beginPath();
+      if (absDeg >= 350) {
+        ctx.arc(arcCenterX, circleCenterY, circleR, 0, Math.PI * 2);
+      } else if (arcDeg > 0) {
+        ctx.arc(
+          arcCenterX,
+          circleCenterY,
+          circleR,
+          -Math.PI / 2 - halfTheta,
+          -Math.PI / 2 + halfTheta
+        );
+      } else {
+        ctx.arc(
+          arcCenterX,
+          circleCenterY,
+          circleR,
+          Math.PI / 2 - halfTheta,
+          Math.PI / 2 + halfTheta
+        );
+      }
+      ctx.strokeStyle = hexToRgba(
+        style.backgroundColor,
+        style.backgroundOpacity * trans.alpha
+      );
+      ctx.lineWidth = maxFontInLine * arcFontFitScale + padY * 1.6;
+      ctx.lineCap = 'round';
+      ctx.stroke();
+      ctx.restore();
+    }
 
     line.forEach((token) => {
       const isSpoken = token.localIdx === localActiveIdx;
@@ -3532,13 +4460,34 @@ function renderAnimatedPrimaryCaption(
         return;
       }
 
-      ctx.save();
+      const effectiveIsItalic =
+        token.raw.isItalic !== undefined
+          ? token.raw.isItalic
+          : lineItalicOverride !== undefined
+          ? lineItalicOverride
+          : token.isItalic;
+      const effectiveIsBold =
+        token.raw.isBold !== undefined
+          ? token.raw.isBold
+          : lineBoldOverride !== undefined
+          ? lineBoldOverride
+          : undefined;
+      const effectiveWeight =
+        effectiveIsBold === true
+          ? Math.max(800, token.fontWeight)
+          : effectiveIsBold === false
+          ? 400
+          : token.fontWeight;
+      const effectiveIsShine = Boolean(token.isShine || lineShineOverride);
+      const italicPrefix = effectiveIsItalic ? 'italic ' : '';
+
       const applyTransToWord =
         style.transitionScope !== 'emphasized' || token.isBigHero || isSpoken;
       const wordCenterX = cursorX + token.width / 2;
       let wordCenterY = lineY;
       let scale = 1;
       let rotationRad = applyTransToWord ? trans.rotationRad : 0;
+      let radialPopOffset = 0;
       let alpha = segFadeAlpha * (applyTransToWord ? trans.alpha : 1);
 
       if (style.animationType === 'premiere-pro') {
@@ -3548,6 +4497,7 @@ function renderAnimatedPrimaryCaption(
           );
           scale = 1.06 + 0.14 * popSpring;
           wordCenterY -= 6 * popSpring;
+          radialPopOffset = 6 * popSpring;
           if (token.isBigHero) {
             rotationRad += -0.025 * Math.sin(wordProgress * Math.PI);
           }
@@ -3563,6 +4513,7 @@ function renderAnimatedPrimaryCaption(
           );
           scale = 1 + 0.18 * spring;
           wordCenterY -= 8 * spring;
+          radialPopOffset = 8 * spring;
         } else if (!isPast) {
           alpha *= 0.75;
         }
@@ -3575,21 +4526,156 @@ function renderAnimatedPrimaryCaption(
         const waveOffset =
           Math.sin(currentTime * 8 * style.animationSpeed + token.localIdx * 0.9) * 7;
         wordCenterY += isSpoken ? waveOffset * 1.4 : waveOffset * 0.5;
+        radialPopOffset = isSpoken ? -waveOffset * 1.2 : -waveOffset * 0.4;
         if (isSpoken) scale = 1.08;
       } else if (style.animationType === 'cinema-fade') {
         wordCenterY += (1 - segFadeAlpha) * 14;
       }
 
-      // Apply Arc Curve if enabled (Section 5.1 & 7.7 Arc)
-      if (style.arcEnabled && style.arcCurveDeg) {
-        const normX =
-          (wordCenterX - baseCenterX) / Math.max(120, maxRenderedLineWidth * 0.55);
-        const clampedNorm = Math.max(-1.2, Math.min(1.2, normX));
-        const deg = style.arcCurveDeg;
-        wordCenterY += (clampedNorm * clampedNorm - 0.35) * deg * 1.4;
-        rotationRad += clampedNorm * ((deg * Math.PI) / 180) * 0.45;
+      let renderedText = token.display;
+      if (style.animationType === 'typewriter' && isSpoken) {
+        const charCount = Math.max(1, Math.ceil(token.display.length * wordProgress));
+        renderedText = token.display.slice(0, charCount);
       }
 
+      const shouldColorWithGradient =
+        Boolean(token.raw.customColor || lineCustomColor || effectiveIsShine) ||
+        isSpoken ||
+        (token.isBigHero && !style.removeEmphasis) ||
+        (isPast && style.animationType === 'karaoke');
+
+      // Polar Circular Arc Rendering (-360° to +360°: 180° arch, -180° reversed valley, 360° full ring, etc.)
+      if (isArcActive) {
+        const chars = Array.from(renderedText);
+        const tokenLinearStart = cursorX - lineStartX;
+        const effectiveTokenFontSize = Math.max(
+          14,
+          Math.round(token.fontSize * arcFontFitScale)
+        );
+
+        ctx.save();
+        ctx.font = `${italicPrefix}${effectiveWeight} ${token.fontSize}px ${getWordFontStack(token.fontFamily)}`;
+        applyCanvasLetterSpacing(ctx, style.letterSpacing ?? 0);
+        const rawCharWidths = chars.map((ch) => Math.max(4, ctx.measureText(ch).width));
+        const rawCharSum = rawCharWidths.reduce((a, b) => a + b, 0) || 1;
+        const normFactor = token.width / rawCharSum;
+        ctx.restore();
+
+        let charLinearOffset = tokenLinearStart;
+
+        chars.forEach((ch, chIdx) => {
+          const chW = rawCharWidths[chIdx] * normFactor;
+          const charLinearCenter = charLinearOffset + chW / 2;
+          charLinearOffset += chW;
+
+          const u = charLinearCenter / totalArcSpanPx - 0.5;
+          const alphaAngle = u * thetaTotal;
+          const effectiveR = circleR + (arcDeg >= 0 ? radialPopOffset : -radialPopOffset);
+
+          const chX = arcCenterX + effectiveR * Math.sin(alphaAngle);
+          const chY =
+            arcDeg >= 0
+              ? circleCenterY - effectiveR * Math.cos(alphaAngle)
+              : circleCenterY + effectiveR * Math.cos(alphaAngle);
+          const chRot =
+            (arcDeg >= 0 ? alphaAngle : -alphaAngle) + rotationRad;
+
+          ctx.save();
+          ctx.translate(chX, chY);
+          ctx.rotate(chRot);
+          ctx.scale(
+            scale * (applyTransToWord ? trans.scaleX : 1),
+            scale * (applyTransToWord ? trans.scaleY : 1)
+          );
+          ctx.globalAlpha = alpha;
+
+          ctx.font = `${italicPrefix}${effectiveWeight} ${effectiveTokenFontSize}px ${getWordFontStack(token.fontFamily)}`;
+          applyCanvasLetterSpacing(ctx, 0);
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+
+          if (style.depth3DEnabled) {
+            const depthPx = Math.max(2, Math.min(20, style.depth3DDepth ?? 8));
+            const angleRad3d = ((style.depth3DAngle ?? 135) * Math.PI) / 180;
+            const dx = Math.cos(angleRad3d);
+            const dy = Math.sin(angleRad3d);
+            ctx.save();
+            ctx.fillStyle = style.depth3DColor || '#FF5722';
+            for (let d = depthPx; d >= 1; d -= 1.5) {
+              ctx.fillText(ch, dx * d, dy * d);
+            }
+            ctx.restore();
+          }
+
+          if (
+            effectiveIsShine ||
+            style.glowEnabled ||
+            (style.animationType === 'neon-glow' && isSpoken) ||
+            (style.animationType === 'premiere-pro' && (isSpoken || token.isBigHero))
+          ) {
+            ctx.shadowColor = effectiveIsShine
+              ? 'rgba(253, 224, 71, 0.92)'
+              : style.glowColor ||
+                style.emphasisGlowColor ||
+                (style.useGradient ? style.gradientMid : style.highlightColor);
+            ctx.shadowBlur = effectiveIsShine
+              ? 22
+              : Math.max(16, style.glowSpread || style.shadowBlur * 1.25);
+            ctx.shadowOffsetX = 0;
+            ctx.shadowOffsetY = 2;
+          } else if ((style.dropShadowEnabled ?? true) && style.shadowBlur > 0) {
+            ctx.shadowColor = style.dropShadowColor || 'rgba(0, 0, 0, 0.88)';
+            ctx.shadowBlur = style.shadowBlur;
+            ctx.shadowOffsetX = style.dropShadowX ?? 0;
+            ctx.shadowOffsetY = style.dropShadowY ?? 4;
+          }
+
+          if (style.strokeWidth > 0) {
+            ctx.lineJoin = 'round';
+            ctx.miterLimit = 2;
+            ctx.lineWidth = token.isBigHero
+              ? Math.round(style.strokeWidth * 1.1)
+              : Math.max(2, Math.round(style.strokeWidth * 0.8));
+            ctx.strokeStyle = style.strokeColor;
+            ctx.strokeText(ch, 0, 0);
+          }
+
+          const charActiveColor = effectiveIsShine
+            ? createWordShineGradient(
+                ctx,
+                chW * 2,
+                effectiveTokenFontSize,
+                currentTime,
+                token.raw.customColor || lineCustomColor || style.highlightColor
+              )
+            : token.raw.customColor || lineCustomColor
+            ? (token.raw.customColor || lineCustomColor)!
+            : createSidzVerticalGradient(
+                ctx,
+                effectiveTokenFontSize,
+                currentTime,
+                style,
+                chW * 2
+              );
+
+          ctx.fillStyle = shouldColorWithGradient
+            ? charActiveColor
+            : createBaseTextFill(
+                ctx,
+                effectiveTokenFontSize,
+                currentTime,
+                style,
+                chW * 2
+              );
+          ctx.fillText(ch, 0, 0);
+          ctx.restore();
+        });
+
+        cursorX += token.width + baseWordGap;
+        return;
+      }
+
+      ctx.save();
       ctx.translate(wordCenterX, wordCenterY);
       if (rotationRad !== 0) ctx.rotate(rotationRad);
       ctx.scale(
@@ -3598,7 +4684,7 @@ function renderAnimatedPrimaryCaption(
       );
       ctx.globalAlpha = alpha;
 
-      ctx.font = `${style.fontWeight} ${token.fontSize}px ${getWordFontStack(token.fontFamily)}`;
+      ctx.font = `${italicPrefix}${effectiveWeight} ${token.fontSize}px ${getWordFontStack(token.fontFamily)}`;
       applyCanvasLetterSpacing(ctx, style.letterSpacing ?? 0);
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
@@ -3638,25 +4724,20 @@ function renderAnimatedPrimaryCaption(
         ctx.fill();
       }
 
-      let renderedText = token.display;
-      if (style.animationType === 'typewriter' && isSpoken) {
-        const charCount = Math.max(1, Math.ceil(token.display.length * wordProgress));
-        renderedText = token.display.slice(0, charCount);
-      }
-
       if (
+        effectiveIsShine ||
         style.glowEnabled ||
         (style.animationType === 'neon-glow' && isSpoken) ||
         (style.animationType === 'premiere-pro' && (isSpoken || token.isBigHero))
       ) {
-        ctx.shadowColor =
-          style.glowColor ||
-          style.emphasisGlowColor ||
-          (style.useGradient ? style.gradientMid : style.highlightColor);
-        ctx.shadowBlur = Math.max(
-          18,
-          style.glowSpread || style.shadowBlur * 1.35
-        );
+        ctx.shadowColor = effectiveIsShine
+          ? 'rgba(253, 224, 71, 0.92)'
+          : style.glowColor ||
+            style.emphasisGlowColor ||
+            (style.useGradient ? style.gradientMid : style.highlightColor);
+        ctx.shadowBlur = effectiveIsShine
+          ? Math.max(22, token.fontSize * 0.42)
+          : Math.max(18, style.glowSpread || style.shadowBlur * 1.35);
         ctx.shadowOffsetX = 0;
         ctx.shadowOffsetY = 3;
       } else if ((style.dropShadowEnabled ?? true) && style.shadowBlur > 0) {
@@ -3676,8 +4757,16 @@ function renderAnimatedPrimaryCaption(
         ctx.strokeText(renderedText, 0, 0);
       }
 
-      const activeGradientOrColor = token.raw.customColor
-        ? token.raw.customColor
+      const activeGradientOrColor = effectiveIsShine
+        ? createWordShineGradient(
+            ctx,
+            token.width,
+            token.fontSize,
+            currentTime,
+            token.raw.customColor || lineCustomColor || style.highlightColor
+          )
+        : token.raw.customColor || lineCustomColor
+        ? (token.raw.customColor || lineCustomColor)!
         : createSidzVerticalGradient(
             ctx,
             token.fontSize,
@@ -3690,7 +4779,7 @@ function renderAnimatedPrimaryCaption(
         ctx.fillStyle = '#090A0F';
         ctx.fillText(renderedText, 0, 0);
       } else if (style.animationType === 'karaoke' && isSpoken) {
-        ctx.fillStyle = style.primaryColor;
+        ctx.fillStyle = lineCustomColor || style.primaryColor;
         ctx.fillText(renderedText, 0, 0);
 
         ctx.save();
@@ -3706,16 +4795,14 @@ function renderAnimatedPrimaryCaption(
         ctx.fillText(renderedText, 0, 0);
         ctx.restore();
       } else {
-        const shouldColorWithGradient =
-          Boolean(token.raw.customColor) ||
-          isSpoken ||
-          (token.isBigHero && !style.removeEmphasis) ||
-          (isPast && style.animationType === 'karaoke');
-
         ctx.fillStyle = shouldColorWithGradient
           ? activeGradientOrColor
-          : createBaseTextFill(ctx, token.fontSize, currentTime, style, token.width);
+          : lineCustomColor || createBaseTextFill(ctx, token.fontSize, currentTime, style, token.width);
         ctx.fillText(renderedText, 0, 0);
+      }
+
+      if (effectiveIsShine) {
+        drawWordShineSparkles(ctx, 0, 0, token.width, token.fontSize, currentTime);
       }
 
       if (

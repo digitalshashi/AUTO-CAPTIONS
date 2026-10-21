@@ -1,6 +1,6 @@
 {
-  "summary": "Implementation plan for redesigning the Captions -> Text inspector panel with collapsible FONTS, FORMAT, POSITION, COLOR, EMPHASIS, SPACING, and EFFECTS sections, interactive multi-stop gradient bars (up to 5 color stops, Angle 0-360°, Word/Char level) in both Color and Emphasis, reordered Captions sub-tabs with Text first, and a sticky bottom Export footer.",
-  "updatedAt": "2026-10-18T11:25:03.477650492Z",
+  "summary": "Implementation plan for Dynamic AI Frame, Poster & Region Style Cloning in VakyaReel / Merupify Studio, enabling users to sample any video frame, external video, or uploaded poster/image using bounding box selection, point-and-click eyedropper, or full-frame AI analysis to instantly generate, apply, and save custom reel caption styles.",
+  "updatedAt": "2026-10-18T17:56:01.101882141Z",
   "requestFeedback": true,
   "userFacing": true
 }

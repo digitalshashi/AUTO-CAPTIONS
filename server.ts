@@ -24,6 +24,7 @@ function getGenAIClient() {
 
 const MULTIMODAL_MODEL_CHAIN = [
   'gemini-flash-latest',
+  'gemini-2.5-flash',
   'gemini-3.1-flash-lite',
   'gemini-3.5-transcribe',
   'gemini-3.8-flash',
@@ -31,6 +32,7 @@ const MULTIMODAL_MODEL_CHAIN = [
 
 const TEXT_MODEL_CHAIN = [
   'gemini-flash-latest',
+  'gemini-2.5-flash',
   'gemini-3.1-flash-lite',
   'gemini-3.8-flash',
 ];
@@ -140,7 +142,7 @@ async function generateContentResilient(
   let lastError: unknown = null;
   const now = Date.now();
 
-  // Filter out models that hit 429 quota in the last 10 minutes so parallel chunks never wait on them
+  // Filter out models that hit 429/503 in the last few seconds so parallel/long-video chunks rotate cleanly
   const activeChain = modelChain.filter((m) => {
     const blockedUntil = exhaustedModelsCache.get(m);
     return !blockedUntil || now > blockedUntil;
@@ -154,7 +156,7 @@ async function generateContentResilient(
       ? inlineSystemInstructionIntoParams(params)
       : params;
 
-    for (let attempt = 0; attempt < 2; attempt++) {
+    for (let attempt = 0; attempt < 3; attempt++) {
       try {
         const effectiveRequestParams =
           attempt > 0 ? inlineSystemInstructionIntoParams(requestParams) : requestParams;
@@ -177,24 +179,26 @@ async function generateContentResilient(
         }
 
         if (isQuotaExhaustedError(err)) {
-          exhaustedModelsCache.set(modelName, Date.now() + 10 * 60 * 1000);
+          const msg = err instanceof Error ? err.message : String(err);
+          const cooldownMs = msg.includes('404') ? 5 * 60 * 1000 : 6 * 1000;
+          exhaustedModelsCache.set(modelName, Date.now() + cooldownMs);
           break;
         }
 
         if (isTransientHighDemandError(err)) {
-          if (attempt === 0) {
-            await sleep(120 + Math.floor(Math.random() * 140));
+          if (attempt < 2) {
+            await sleep(180 * (attempt + 1) + Math.floor(Math.random() * 140));
             continue;
           }
-          // Temporarily deprioritize 503 model for 45 seconds so parallel chunks use fast healthy models
-          exhaustedModelsCache.set(modelName, Date.now() + 45 * 1000);
+          // Temporarily deprioritize 503 model for 8 seconds so subsequent chunks use healthy models
+          exhaustedModelsCache.set(modelName, Date.now() + 8 * 1000);
           break;
         }
 
         break;
       }
     }
-    await sleep(30);
+    await sleep(40);
   }
 
   throw lastError || new Error('All Gemini models are currently experiencing high demand.');
@@ -829,11 +833,20 @@ CRITICAL VERBATIM TRANSCRIPTION & ROMAN (TINGLISH) SCRIPT RULES:
                   },
                 },
                 {
-                  text: `Transcribe 100% VERBATIM word-for-word EVERY SINGLE WORD spoken in this ${clipDuration.toFixed(
-                    1
-                  )}s audio clip from 0.0s to ${clipDuration.toFixed(
-                    1
-                  )}s. Write "fullVerbatimTranscript" and every segment's "verbatimRoman" STRICTLY in phonetic Roman English alphabet (Tinglish/Hinglish/English) — NEVER use native Telugu (తెలుగు) Unicode characters in "verbatimRoman"! Split every single word into sequential 2-to-4 word caption lines in "segments" with accurate startTime and endTime timestamps spanning the full speech duration without repeating lines. ${languageHintInstruction} ${emojiInstruction}`,
+                  text:
+                    mimeType.startsWith('video/') && startOffset > 0
+                      ? `Transcribe 100% VERBATIM word-for-word EVERY SINGLE WORD spoken in the time window from ${startOffset.toFixed(
+                          1
+                        )}s to ${(startOffset + clipDuration).toFixed(
+                          1
+                        )}s (${clipDuration.toFixed(
+                          1
+                        )}s duration) of this video. Write "fullVerbatimTranscript" and every segment's "verbatimRoman" STRICTLY in phonetic Roman English alphabet (Tinglish/Hinglish/English) — NEVER use native Telugu (తెలుగు) Unicode characters in "verbatimRoman"! Split every single word into sequential 2-to-4 word caption lines in "segments" with accurate startTime and endTime timestamps spanning the full speech duration without repeating lines. ${languageHintInstruction} ${emojiInstruction}`
+                      : `Transcribe 100% VERBATIM word-for-word EVERY SINGLE WORD spoken in this ${clipDuration.toFixed(
+                          1
+                        )}s audio clip from 0.0s to ${clipDuration.toFixed(
+                          1
+                        )}s. Write "fullVerbatimTranscript" and every segment's "verbatimRoman" STRICTLY in phonetic Roman English alphabet (Tinglish/Hinglish/English) — NEVER use native Telugu (తెలుగు) Unicode characters in "verbatimRoman"! Split every single word into sequential 2-to-4 word caption lines in "segments" with accurate startTime and endTime timestamps spanning the full speech duration without repeating lines. ${languageHintInstruction} ${emojiInstruction}`,
                 },
               ],
             },
@@ -869,9 +882,9 @@ CRITICAL VERBATIM TRANSCRIPTION & ROMAN (TINGLISH) SCRIPT RULES:
         // Handled gracefully by fallback below
       }
 
-      // Completeness Verification: Only rebuild from fullVerbatimTranscript if rawSegments is empty,
-      // so we NEVER append duplicate native-script trailing lines when segments already exist!
-      if (rawSegments.length === 0 && fullVerbatimTranscript) {
+      // Completeness Verification: Rebuild from fullVerbatimTranscript if rawSegments is empty,
+      // OR append any trailing unspoken words from fullVerbatimTranscript if the model stopped segments early!
+      if (fullVerbatimTranscript) {
         const stripClean = (s: string) =>
           s
             .replace(/[*.,!?;:'"“”‘’()[\]{}\-]/g, '')
@@ -881,7 +894,7 @@ CRITICAL VERBATIM TRANSCRIPTION & ROMAN (TINGLISH) SCRIPT RULES:
           .split(/\s+/)
           .filter((w) => stripClean(w).length > 0);
 
-        if (fullWords.length > 0) {
+        if (rawSegments.length === 0 && fullWords.length > 0) {
           const chunkSize = 3;
           for (let i = 0; i < fullWords.length; i += chunkSize) {
             const phrase = transliterateIndicToRoman(
@@ -896,6 +909,38 @@ CRITICAL VERBATIM TRANSCRIPTION & ROMAN (TINGLISH) SCRIPT RULES:
               verbatimNative: phrase,
               englishMeaning: phrase,
             });
+          }
+        } else if (rawSegments.length > 0 && fullWords.length > 2) {
+          const segmentWordCount = rawSegments.reduce((acc, s) => {
+            const txt = String(
+              s.verbatimRoman || s.verbatimNative || s.englishMeaning || ''
+            ).trim();
+            return acc + txt.split(/\s+/).filter((w) => stripClean(w).length > 0).length;
+          }, 0);
+          // If segments missed ANY trailing words from fullVerbatimTranscript, append them so 100% of spoken words become captions!
+          if (segmentWordCount < fullWords.length - 1) {
+            const missingWords = fullWords.slice(segmentWordCount);
+            const lastSegEnd = Number(
+              rawSegments[rawSegments.length - 1]?.endTime ?? clipDuration * 0.65
+            );
+            const remStart = Math.min(clipDuration * 0.88, Math.max(0.4, lastSegEnd));
+            const remSpan = Math.max(0.6, clipDuration - remStart);
+            const chunkSize = 3;
+            for (let i = 0; i < missingWords.length; i += chunkSize) {
+              const phrase = transliterateIndicToRoman(
+                missingWords.slice(i, i + chunkSize).join(' ')
+              );
+              rawSegments.push({
+                startTime: remStart + (i / missingWords.length) * remSpan,
+                endTime:
+                  remStart +
+                  (Math.min(missingWords.length, i + chunkSize) / missingWords.length) *
+                    remSpan,
+                verbatimRoman: phrase,
+                verbatimNative: phrase,
+                englishMeaning: phrase,
+              });
+            }
           }
         }
       }
@@ -1632,6 +1677,180 @@ ${JSON.stringify(compactTranscript)}`,
       res.status(200).json({
         imageDataUrl: '',
         fallbackRequired: true,
+      });
+    }
+  });
+
+  // Dynamic AI Frame, Poster & Region Style Cloning Endpoint (Gemini Vision)
+  app.post('/api/style/clone-from-frame', async (req, res) => {
+    try {
+      const {
+        fullFrameDataUrl = '',
+        croppedRegionDataUrl = '',
+        regionIntent = 'auto',
+        toolMode = 'box',
+        sampledHexStops = [],
+        sourceLabel = 'Frame',
+      } = req.body || {};
+
+      const targetImageUrl = String(croppedRegionDataUrl || fullFrameDataUrl || '');
+      const match = targetImageUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
+
+      const fallbackStops =
+        Array.isArray(sampledHexStops) && sampledHexStops.length >= 2
+          ? sampledHexStops.slice(0, 5)
+          : ['#FFFBEB', '#FACC15', '#F97316'];
+
+      if (!match) {
+        res.status(200).json({
+          presetName: `${sourceLabel} Style`,
+          fontFamily: 'Montserrat',
+          textTransform: 'uppercase',
+          primaryColor: '#FFFFFF',
+          highlightColor: fallbackStops[0] || '#FACC15',
+          gradientColors: fallbackStops,
+          gradientAngle: 135,
+          strokeWidth: 2,
+          strokeColor: '#000000',
+          dropShadowEnabled: true,
+          glowEnabled: regionIntent === 'logo' || regionIntent === 'color',
+          glowColor: fallbackStops[1] || '#10B981',
+          depth3DEnabled: false,
+          backgroundEnabled: regionIntent === 'logo',
+          backgroundColor: '#090D16',
+          reasoningSummary: `Created style from sampled palette (${fallbackStops.join(', ')})`,
+        });
+        return;
+      }
+
+      const mimeType = match[1];
+      const base64Data = match[2];
+
+      const allowedFonts = [
+        'Montserrat',
+        'Anton',
+        'Bricolage Grotesque',
+        'Plus Jakarta Sans',
+        'Outfit',
+        'Playfair Display',
+        'Caveat',
+        'Rubik Mono One',
+        'Silkscreen',
+        'Cinzel',
+        'Bebas Neue',
+        'Poppins',
+        'Oswald',
+      ];
+
+      const promptText = `You are an elite short-form video typography & visual style cloning AI.
+Analyze this ${toolMode === 'full' ? 'full video frame / poster' : 'selected bounding-box region'} (User intent: "${regionIntent}", Source: "${sourceLabel}").
+Client-side pixel sampler detected these dominant hex colors in the region: ${JSON.stringify(fallbackStops)}.
+
+Based on whether the selected region shows TEXT/CAPTIONS, a LOGO MARK, or a COLOR/POSTER AREA:
+1. Pick the closest matching font family from this exact studio list: ${allowedFonts.join(', ')}.
+2. Determine casing ("uppercase" | "lowercase" | "capitalize" | "none").
+3. Extract a vivid 3-to-5 stop gradient ("gradientColors" array of hex strings) and optimal "gradientAngle" (0-360) that reproduces or harmonizes with the region's typography, logo mark, or color grade.
+4. Set "primaryColor" (base text hex), "highlightColor" (hero word hex), "strokeWidth" (0-6), "strokeColor" (hex), "dropShadowEnabled" (boolean), "glowEnabled" (boolean), "glowColor" (hex), "depth3DEnabled" (boolean), "backgroundEnabled" (boolean), and "backgroundColor" (hex).
+5. Provide a short "presetName" (2-3 words) and a concise 1-sentence "reasoningSummary".`;
+
+      const response = await generateContentResilient(
+        {
+          contents: {
+            parts: [
+              {
+                inlineData: {
+                  mimeType,
+                  data: base64Data,
+                },
+              },
+              { text: promptText },
+            ],
+          },
+          config: {
+            temperature: 0.25,
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                presetName: { type: Type.STRING },
+                fontFamily: { type: Type.STRING },
+                textTransform: { type: Type.STRING },
+                primaryColor: { type: Type.STRING },
+                highlightColor: { type: Type.STRING },
+                gradientColors: {
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING },
+                },
+                gradientAngle: { type: Type.INTEGER },
+                strokeWidth: { type: Type.NUMBER },
+                strokeColor: { type: Type.STRING },
+                dropShadowEnabled: { type: Type.BOOLEAN },
+                glowEnabled: { type: Type.BOOLEAN },
+                glowColor: { type: Type.STRING },
+                depth3DEnabled: { type: Type.BOOLEAN },
+                backgroundEnabled: { type: Type.BOOLEAN },
+                backgroundColor: { type: Type.STRING },
+                reasoningSummary: { type: Type.STRING },
+              },
+              required: [
+                'presetName',
+                'fontFamily',
+                'textTransform',
+                'primaryColor',
+                'highlightColor',
+                'gradientColors',
+                'gradientAngle',
+                'reasoningSummary',
+              ],
+            },
+          },
+        },
+        TEXT_MODEL_CHAIN
+      );
+
+      const parsed = safeParseJSON<Record<string, unknown>>(response.text, {
+        presetName: `${sourceLabel} Clone`,
+        fontFamily: regionIntent === 'logo' ? 'Outfit' : 'Anton',
+        textTransform: 'uppercase',
+        primaryColor: '#FFFFFF',
+        highlightColor: fallbackStops[0] || '#FACC15',
+        gradientColors: fallbackStops,
+        gradientAngle: 135,
+        strokeWidth: 2,
+        strokeColor: '#000000',
+        dropShadowEnabled: true,
+        glowEnabled: true,
+        glowColor: fallbackStops[1] || '#10B981',
+        depth3DEnabled: false,
+        backgroundEnabled: false,
+        backgroundColor: '#000000',
+        reasoningSummary: `Matched style and ${fallbackStops.length}-stop gradient from ${sourceLabel}.`,
+      });
+
+      res.json(parsed);
+    } catch (error: unknown) {
+      console.error('Frame style clone fallback:', error);
+      const fallbackStops =
+        Array.isArray(req.body?.sampledHexStops) && req.body.sampledHexStops.length >= 2
+          ? req.body.sampledHexStops.slice(0, 5)
+          : ['#FFFBEB', '#FACC15', '#F97316'];
+      res.status(200).json({
+        presetName: 'AI Frame Clone',
+        fontFamily: 'Montserrat',
+        textTransform: 'uppercase',
+        primaryColor: '#FFFFFF',
+        highlightColor: fallbackStops[0] || '#FACC15',
+        gradientColors: fallbackStops,
+        gradientAngle: 135,
+        strokeWidth: 2,
+        strokeColor: '#000000',
+        dropShadowEnabled: true,
+        glowEnabled: true,
+        glowColor: fallbackStops[1] || '#10B981',
+        depth3DEnabled: false,
+        backgroundEnabled: false,
+        backgroundColor: '#000000',
+        reasoningSummary: `Synthesized high-contrast caption style from sampled colors (${fallbackStops.join(', ')}).`,
       });
     }
   });

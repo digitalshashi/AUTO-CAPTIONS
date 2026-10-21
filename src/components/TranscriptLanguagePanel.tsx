@@ -247,6 +247,7 @@ export const TranscriptLanguagePanel: React.FC<TranscriptLanguagePanelProps> = (
 
   const [editingSegmentId, setEditingSegmentId] = useState<string | null>(null);
   const [lineStylePopupSegId, setLineStylePopupSegId] = useState<string | null>(null);
+  const [openCurveSegId, setOpenCurveSegId] = useState<string | null>(null);
   const [lineTemplateSearch, setLineTemplateSearch] = useState<string>('');
   const [selectedWordRef, setSelectedWordRef] = useState<{
     segmentId: string;
@@ -1077,6 +1078,265 @@ export const TranscriptLanguagePanel: React.FC<TranscriptLanguagePanelProps> = (
               )}
             </div>
 
+            {/* ALWAYS-ACCESSIBLE CAPTION LINES (1 / 2 / 3 LINES) & PER-LINE STYLE INCREASE/DECREASE BAR */}
+            <div className="px-3.5 py-2 bg-[#15161B] border-b border-white/[0.06] space-y-1.5 shrink-0 text-[11px]">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-1.5">
+                  <Columns className="w-3.5 h-3.5 text-[#34D399] shrink-0" />
+                  <span className="font-bold text-zinc-200">Caption Lines:</span>
+                  <div className="flex items-center bg-[#0E0F13] p-0.5 rounded-lg border border-white/[0.08]">
+                    {(
+                      [
+                        { id: 1, label: '1 Line' },
+                        { id: 2, label: '2 Lines' },
+                        { id: 3, label: '3 Lines' },
+                      ] as const
+                    ).map((opt) => {
+                      const activeGlobalLines =
+                        styleConfig.maxLinesPerCaption &&
+                        styleConfig.maxLinesPerCaption >= 1
+                          ? styleConfig.maxLinesPerCaption
+                          : styleConfig.smallTwoLineMode === 'single-line'
+                          ? 1
+                          : 2;
+                      const isSel = activeGlobalLines === opt.id;
+                      return (
+                        <button
+                          key={`global-lines-${opt.id}`}
+                          type="button"
+                          onClick={() => {
+                            onUpdateStyle?.({
+                              maxLinesPerCaption: opt.id,
+                              smallTwoLineMode:
+                                opt.id === 1 ? 'single-line' : 'two-line-split',
+                            });
+                            segments.forEach((s) => {
+                              if (
+                                s.maxLines !== undefined ||
+                                s.lineStyleOverride?.maxLines !== undefined
+                              ) {
+                                const nextOv = { ...(s.lineStyleOverride || {}) };
+                                delete nextOv.maxLines;
+                                onUpdateSegmentMeta?.(s.id, {
+                                  maxLines: undefined,
+                                  lineStyleOverride: nextOv,
+                                });
+                              }
+                            });
+                          }}
+                          className={`px-2 py-0.5 rounded-md text-[10px] font-bold transition-colors cursor-pointer ${
+                            isSel
+                              ? 'bg-[#24B47E] text-[#050505]'
+                              : 'text-zinc-400 hover:text-white'
+                          }`}
+                        >
+                          {opt.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <span className="text-[10px] text-zinc-400">
+                  Click any word for <b className="text-zinc-200">B / I / ✦ Shine</b> · Click <b className="text-[#34D399]">✎</b> to edit all lines
+                </span>
+              </div>
+
+              {/* Per-Line Global Size (-/+) & Style (Bold, Italic, Shine, Color) Controls */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 pt-0.5">
+                {[1, 2, 3]
+                  .slice(
+                    0,
+                    styleConfig.maxLinesPerCaption === 3
+                      ? 3
+                      : styleConfig.maxLinesPerCaption === 1 ||
+                        styleConfig.smallTwoLineMode === 'single-line'
+                      ? 1
+                      : 2
+                  )
+                  .map((lineIdx) => {
+                    const baseSize = styleConfig.fontSize || 48;
+                    const curSize =
+                      lineIdx === 1
+                        ? styleConfig.line1FontSizePx ?? baseSize
+                        : lineIdx === 2
+                        ? styleConfig.line2FontSizePx ?? baseSize
+                        : styleConfig.line3FontSizePx ?? baseSize;
+                    const isBold =
+                      lineIdx === 1
+                        ? Boolean(styleConfig.line1Bold)
+                        : lineIdx === 2
+                        ? Boolean(styleConfig.line2Bold)
+                        : Boolean(styleConfig.line3Bold);
+                    const isItalic =
+                      lineIdx === 1
+                        ? Boolean(styleConfig.line1Italic)
+                        : lineIdx === 2
+                        ? Boolean(styleConfig.line2Italic)
+                        : Boolean(styleConfig.line3Italic);
+                    const isShine =
+                      lineIdx === 1
+                        ? Boolean(styleConfig.line1Shine)
+                        : lineIdx === 2
+                        ? Boolean(styleConfig.line2Shine)
+                        : Boolean(styleConfig.line3Shine);
+                    const curColor =
+                      lineIdx === 1
+                        ? styleConfig.line1Color || styleConfig.primaryColor || '#FFFFFF'
+                        : lineIdx === 2
+                        ? styleConfig.line2Color || styleConfig.primaryColor || '#FFFFFF'
+                        : styleConfig.line3Color || styleConfig.primaryColor || '#FFFFFF';
+
+                    const updateGlobalLineProp = (
+                      partial: Partial<CaptionStyleConfig>
+                    ) => {
+                      onUpdateStyle?.(partial);
+                    };
+
+                    return (
+                      <div
+                        key={`top-line-ctrl-${lineIdx}`}
+                        className="flex items-center justify-between gap-1.5 px-2 py-1 rounded-lg bg-[#0F1015] border border-white/[0.07]"
+                      >
+                        <span className="text-[10px] font-bold text-[#34D399] shrink-0">
+                          Line {lineIdx}:
+                        </span>
+                        <div className="flex items-center gap-1">
+                          {/* Decrease / Increase Line Style Size */}
+                          <div className="flex items-center bg-[#181920] rounded-md border border-white/10">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const next = Math.max(16, curSize - 2);
+                                updateGlobalLineProp(
+                                  lineIdx === 1
+                                    ? { line1FontSizePx: next }
+                                    : lineIdx === 2
+                                    ? { line2FontSizePx: next }
+                                    : { line3FontSizePx: next }
+                                );
+                              }}
+                              title={`Decrease Line ${lineIdx} font size`}
+                              className="px-1.5 py-0.5 text-zinc-400 hover:text-white font-bold text-[10px] cursor-pointer"
+                            >
+                              -
+                            </button>
+                            <span className="text-[10px] font-mono font-bold text-white px-1">
+                              {curSize}px
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const next = Math.min(130, curSize + 2);
+                                updateGlobalLineProp(
+                                  lineIdx === 1
+                                    ? { line1FontSizePx: next }
+                                    : lineIdx === 2
+                                    ? { line2FontSizePx: next }
+                                    : { line3FontSizePx: next }
+                                );
+                              }}
+                              title={`Increase Line ${lineIdx} font size`}
+                              className="px-1.5 py-0.5 text-zinc-400 hover:text-white font-bold text-[10px] cursor-pointer"
+                            >
+                              +
+                            </button>
+                          </div>
+
+                          {/* Line Bold */}
+                          <button
+                            type="button"
+                            onClick={() =>
+                              updateGlobalLineProp(
+                                lineIdx === 1
+                                  ? { line1Bold: !isBold }
+                                  : lineIdx === 2
+                                  ? { line2Bold: !isBold }
+                                  : { line3Bold: !isBold }
+                              )
+                            }
+                            title={`Toggle Bold on Line ${lineIdx}`}
+                            className={`px-1.5 py-0.5 rounded text-[10px] font-extrabold border cursor-pointer ${
+                              isBold
+                                ? 'bg-[#24B47E] text-[#050505] border-[#24B47E]'
+                                : 'bg-[#181920] text-zinc-400 border-white/10 hover:text-white'
+                            }`}
+                          >
+                            B
+                          </button>
+
+                          {/* Line Italic */}
+                          <button
+                            type="button"
+                            onClick={() =>
+                              updateGlobalLineProp(
+                                lineIdx === 1
+                                  ? { line1Italic: !isItalic }
+                                  : lineIdx === 2
+                                  ? { line2Italic: !isItalic }
+                                  : { line3Italic: !isItalic }
+                              )
+                            }
+                            title={`Toggle Italic on Line ${lineIdx}`}
+                            className={`px-1.5 py-0.5 rounded text-[10px] italic font-serif font-bold border cursor-pointer ${
+                              isItalic
+                                ? 'bg-[#24B47E] text-[#050505] border-[#24B47E]'
+                                : 'bg-[#181920] text-zinc-400 border-white/10 hover:text-white'
+                            }`}
+                          >
+                            I
+                          </button>
+
+                          {/* Line Shine */}
+                          <button
+                            type="button"
+                            onClick={() =>
+                              updateGlobalLineProp(
+                                lineIdx === 1
+                                  ? { line1Shine: !isShine }
+                                  : lineIdx === 2
+                                  ? { line2Shine: !isShine }
+                                  : { line3Shine: !isShine }
+                              )
+                            }
+                            title={`Toggle Metallic Shine on Line ${lineIdx}`}
+                            className={`px-1.5 py-0.5 rounded text-[10px] font-bold border cursor-pointer ${
+                              isShine
+                                ? 'bg-amber-400 text-[#050505] border-amber-300'
+                                : 'bg-[#181920] text-zinc-400 border-white/10 hover:text-amber-300'
+                            }`}
+                          >
+                            ✦
+                          </button>
+
+                          {/* Line Color */}
+                          <label
+                            title={`Line ${lineIdx} Text Color`}
+                            className="w-4 h-4 rounded border border-white/25 cursor-pointer shrink-0 overflow-hidden"
+                            style={{ backgroundColor: curColor }}
+                          >
+                            <input
+                              type="color"
+                              value={curColor}
+                              onChange={(e) =>
+                                updateGlobalLineProp(
+                                  lineIdx === 1
+                                    ? { line1Color: e.target.value }
+                                    : lineIdx === 2
+                                    ? { line2Color: e.target.value }
+                                    : { line3Color: e.target.value }
+                                )
+                              }
+                              className="opacity-0 w-0 h-0"
+                            />
+                          </label>
+                        </div>
+                      </div>
+                    );
+                  })}
+              </div>
+            </div>
+
             {/* GOLDOX SECTION 1.3: FIND & REPLACE BAR WITH MATCH CASE */}
             {(isFindReplaceOpen || isSearchOpen) && (
               <div className="px-3.5 py-2.5 bg-[#15161D] border-b border-white/[0.07] space-y-2 shrink-0 text-xs">
@@ -1570,8 +1830,178 @@ export const TranscriptLanguagePanel: React.FC<TranscriptLanguagePanelProps> = (
                     const displayNum = idx + 1;
                     const isLineStyleOpen = lineStylePopupSegId === seg.id;
                     const isEditingLine = editingSegmentId === seg.id;
-                    const curArcDeg = seg.arcCurveDeg || 0;
+                    const isCurveOpen = openCurveSegId === seg.id;
+                    const curArcDeg =
+                      seg.arcCurveDeg !== undefined
+                        ? seg.arcCurveDeg
+                        : styleConfig.arcEnabled
+                        ? styleConfig.arcCurveDeg || 0
+                        : 0;
                     const lineOverride: LineStyleOverride = seg.lineStyleOverride || {};
+
+                    const segMaxLines: 1 | 2 | 3 =
+                      (seg.maxLines as 1 | 2 | 3 | undefined) ??
+                      (lineOverride.maxLines as 1 | 2 | 3 | undefined) ??
+                      (styleConfig.maxLinesPerCaption === 3
+                        ? 3
+                        : styleConfig.maxLinesPerCaption === 1 ||
+                          styleConfig.smallTwoLineMode === 'single-line'
+                        ? 1
+                        : 2);
+
+                    // Compute multi-line split (Line 1, Line 2, Line 3) for this segment
+                    const autoTwoSplit = splitSegmentIntoTwoLines(
+                      seg,
+                      styleConfig.primaryTrack,
+                      segMaxLines
+                    );
+                    const wordsArr = primaryWords.map((w) => w.word);
+                    const thirdIndex = Math.max(1, Math.ceil(wordsArr.length / 3));
+                    const twoThirdIndex = Math.max(
+                      thirdIndex + 1,
+                      Math.ceil((wordsArr.length * 2) / 3)
+                    );
+                    const effectiveLine1Text =
+                      segMaxLines === 1
+                        ? primaryText
+                        : seg.customLine1Text !== undefined
+                        ? seg.customLine1Text
+                        : segMaxLines === 3
+                        ? autoTwoSplit.line1Text || wordsArr.slice(0, thirdIndex).join(' ')
+                        : autoTwoSplit.line1Text || primaryText;
+                    const effectiveLine2Text =
+                      segMaxLines === 1
+                        ? ''
+                        : seg.customLine2Text !== undefined
+                        ? seg.customLine2Text
+                        : segMaxLines === 3
+                        ? autoTwoSplit.line2Text ||
+                          wordsArr.slice(thirdIndex, twoThirdIndex).join(' ')
+                        : autoTwoSplit.line2Text || '';
+                    const effectiveLine3Text =
+                      segMaxLines === 3
+                        ? seg.customLine3Text !== undefined
+                          ? seg.customLine3Text
+                          : autoTwoSplit.line3Text || wordsArr.slice(twoThirdIndex).join(' ')
+                        : '';
+
+                    // Partition primaryWords across Line 1, Line 2, Line 3 so word chips can be displayed per-line
+                    const l1WordCount =
+                      segMaxLines === 1
+                        ? primaryWords.length
+                        : effectiveLine1Text
+                            .trim()
+                            .split(/\s+/)
+                            .filter(Boolean).length;
+                    const l2WordCount =
+                      segMaxLines <= 1
+                        ? 0
+                        : effectiveLine2Text
+                            .trim()
+                            .split(/\s+/)
+                            .filter(Boolean).length;
+
+                    const lineWordGroups: {
+                      lineNum: 1 | 2 | 3;
+                      items: { w: WordTiming; wIdx: number }[];
+                    }[] =
+                      segMaxLines === 1
+                        ? [
+                            {
+                              lineNum: 1,
+                              items: primaryWords.map((w, wIdx) => ({ w, wIdx })),
+                            },
+                          ]
+                        : segMaxLines === 2
+                        ? [
+                            {
+                              lineNum: 1,
+                              items: primaryWords
+                                .slice(0, Math.max(1, l1WordCount))
+                                .map((w, idx) => ({ w, wIdx: idx })),
+                            },
+                            {
+                              lineNum: 2,
+                              items: primaryWords
+                                .slice(Math.max(1, l1WordCount))
+                                .map((w, idx) => ({
+                                  w,
+                                  wIdx: Math.max(1, l1WordCount) + idx,
+                                })),
+                            },
+                          ]
+                        : [
+                            {
+                              lineNum: 1,
+                              items: primaryWords
+                                .slice(0, Math.max(1, l1WordCount))
+                                .map((w, idx) => ({ w, wIdx: idx })),
+                            },
+                            {
+                              lineNum: 2,
+                              items: primaryWords
+                                .slice(
+                                  Math.max(1, l1WordCount),
+                                  Math.max(1, l1WordCount) + Math.max(0, l2WordCount)
+                                )
+                                .map((w, idx) => ({
+                                  w,
+                                  wIdx: Math.max(1, l1WordCount) + idx,
+                                })),
+                            },
+                            {
+                              lineNum: 3,
+                              items: primaryWords
+                                .slice(
+                                  Math.max(1, l1WordCount) + Math.max(0, l2WordCount)
+                                )
+                                .map((w, idx) => ({
+                                  w,
+                                  wIdx:
+                                    Math.max(1, l1WordCount) +
+                                    Math.max(0, l2WordCount) +
+                                    idx,
+                                })),
+                            },
+                          ];
+
+                    const handleCommitMultiLineEdit = (
+                      nextL1: string,
+                      nextL2: string,
+                      nextL3: string,
+                      linesCount: 1 | 2 | 3 = segMaxLines
+                    ) => {
+                      const combined =
+                        linesCount === 1
+                          ? nextL1.trim()
+                          : linesCount === 2
+                          ? [nextL1.trim(), nextL2.trim()].filter(Boolean).join(' ')
+                          : [nextL1.trim(), nextL2.trim(), nextL3.trim()]
+                              .filter(Boolean)
+                              .join(' ');
+                      onUpdateSegmentMeta?.(seg.id, {
+                        maxLines: linesCount,
+                        customLine1Text: linesCount >= 2 ? nextL1 : undefined,
+                        customLine2Text: linesCount >= 2 ? nextL2 : undefined,
+                        customLine3Text: linesCount === 3 ? nextL3 : undefined,
+                        lineStyleOverride: {
+                          ...lineOverride,
+                          maxLines: linesCount,
+                        },
+                      });
+                      if (combined) {
+                        onUpdateSegmentText(seg.id, styleConfig.primaryTrack, combined);
+                      }
+                    };
+
+                    const selectedWordInThisSeg =
+                      selectedWordRef?.segmentId === seg.id &&
+                      primaryWords[selectedWordRef.wordIndex]
+                        ? {
+                            wordObj: primaryWords[selectedWordRef.wordIndex],
+                            wordIndex: selectedWordRef.wordIndex,
+                          }
+                        : null;
 
                     return (
                       <div
@@ -1592,18 +2022,18 @@ export const TranscriptLanguagePanel: React.FC<TranscriptLanguagePanelProps> = (
                             segmentId: seg.id,
                           });
                         }}
-                        title="Click line to seek · Click ⊞ on the right to open LINE STYLING pop-up"
+                        title="Click line to seek · Click any word to style Bold/Italic/Shine · Click ✎ to edit Line 1 & Line 2"
                         className={`py-2.5 px-2.5 transition-colors cursor-pointer ${
                           isActive || isLineStyleOpen
                             ? 'bg-white/[0.04]'
                             : 'hover:bg-white/[0.015]'
                         }`}
                       >
-                        <div className="flex items-center justify-between gap-3">
-                          {/* LEFT: Circular Numbered Line Badge (1, 2, 3...) + Word Chips */}
-                          <div className="flex items-center gap-3.5 min-w-0 flex-1 flex-wrap">
+                        <div className="flex items-start justify-between gap-2.5">
+                          {/* LEFT: Circular Numbered Line Badge (1, 2, 3...) + Multi-Line Word Chips or Multi-Line Editor */}
+                          <div className="flex items-start gap-3 min-w-0 flex-1">
                             <span
-                              className={`w-6 h-6 rounded-full text-[11px] font-mono tabular-nums flex items-center justify-center shrink-0 transition-colors ${
+                              className={`mt-0.5 w-6 h-6 rounded-full text-[11px] font-mono tabular-nums flex items-center justify-center shrink-0 transition-colors ${
                                 isLineStyleOpen
                                   ? 'bg-[#24B47E] text-[#050505] font-bold'
                                   : isActive
@@ -1614,105 +2044,611 @@ export const TranscriptLanguagePanel: React.FC<TranscriptLanguagePanelProps> = (
                               {displayNum}
                             </span>
 
-                            {/* Inline Edit Input OR Kalakar Word Chips */}
+                            {/* Inline Multi-Line Editor OR Grouped Multi-Line Word Chips */}
                             {isEditingLine ? (
                               <div
-                                className="flex items-center gap-1.5 flex-1 min-w-[180px]"
+                                className="flex-1 min-w-0 p-2.5 rounded-xl bg-[#16181F] border border-[#24B47E]/50 space-y-2 shadow-lg"
                                 onClick={(e) => e.stopPropagation()}
                               >
-                                <input
-                                  type="text"
-                                  value={primaryText}
-                                  autoFocus
-                                  onChange={(e) =>
-                                    onUpdateSegmentText(
-                                      seg.id,
-                                      styleConfig.primaryTrack,
-                                      e.target.value
-                                    )
-                                  }
-                                  onKeyDown={(e) => {
-                                    if (e.key === 'Enter') setEditingSegmentId(null);
-                                  }}
-                                  className="flex-1 bg-[#1B1B22] text-white text-sm px-2.5 py-1 rounded-lg border border-[#2BAE66] focus:outline-none"
-                                />
-                                <button
-                                  type="button"
-                                  onClick={() => setEditingSegmentId(null)}
-                                  className="px-2 py-1 rounded-lg bg-[#2BAE66] text-white text-xs font-semibold cursor-pointer"
-                                >
-                                  Done
-                                </button>
+                                {/* Top Controls inside Inline Editor: 1L / 2L / 3L + Swap + Auto Split + Done */}
+                                <div className="flex flex-wrap items-center justify-between gap-1.5 pb-1 border-b border-white/[0.07]">
+                                  <div className="flex items-center gap-1">
+                                    <span className="text-[10px] font-bold text-[#34D399] mr-1">
+                                      Lines:
+                                    </span>
+                                    {([1, 2, 3] as const).map((cnt) => (
+                                      <button
+                                        key={`seg-edit-lines-${seg.id}-${cnt}`}
+                                        type="button"
+                                        onClick={() => {
+                                          if (cnt === 1) {
+                                            onUpdateSegmentMeta?.(seg.id, {
+                                              maxLines: 1,
+                                              customLine1Text: undefined,
+                                              customLine2Text: undefined,
+                                              customLine3Text: undefined,
+                                              lineStyleOverride: {
+                                                ...lineOverride,
+                                                maxLines: 1,
+                                              },
+                                            });
+                                          } else if (cnt === 2) {
+                                            const split2 = splitSegmentIntoTwoLines(
+                                              seg,
+                                              styleConfig.primaryTrack,
+                                              2
+                                            );
+                                            onUpdateSegmentMeta?.(seg.id, {
+                                              maxLines: 2,
+                                              customLine1Text:
+                                                seg.customLine1Text ?? split2.line1Text,
+                                              customLine2Text:
+                                                seg.customLine2Text ?? split2.line2Text,
+                                              customLine3Text: undefined,
+                                              lineStyleOverride: {
+                                                ...lineOverride,
+                                                maxLines: 2,
+                                              },
+                                            });
+                                          } else {
+                                            onUpdateSegmentMeta?.(seg.id, {
+                                              maxLines: 3,
+                                              customLine1Text: effectiveLine1Text,
+                                              customLine2Text: effectiveLine2Text,
+                                              customLine3Text: effectiveLine3Text,
+                                              lineStyleOverride: {
+                                                ...lineOverride,
+                                                maxLines: 3,
+                                              },
+                                            });
+                                          }
+                                        }}
+                                        className={`px-2 py-0.5 rounded text-[10px] font-bold cursor-pointer border ${
+                                          segMaxLines === cnt
+                                            ? 'bg-[#24B47E] text-[#050505] border-[#24B47E]'
+                                            : 'bg-[#101217] text-zinc-400 border-white/10 hover:text-white'
+                                        }`}
+                                      >
+                                        {cnt} {cnt === 1 ? 'Line' : 'Lines'}
+                                      </button>
+                                    ))}
+                                  </div>
+
+                                  <div className="flex items-center gap-1">
+                                    {segMaxLines >= 2 && (
+                                      <>
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            const l1Tokens = effectiveLine1Text
+                                              .trim()
+                                              .split(/\s+/)
+                                              .filter(Boolean);
+                                            if (l1Tokens.length > 1) {
+                                              const moved = l1Tokens.pop()!;
+                                              const next1 = l1Tokens.join(' ');
+                                              const next2 = [moved, effectiveLine2Text.trim()]
+                                                .filter(Boolean)
+                                                .join(' ');
+                                              handleCommitMultiLineEdit(
+                                                next1,
+                                                next2,
+                                                effectiveLine3Text,
+                                                segMaxLines
+                                              );
+                                            }
+                                          }}
+                                          title="Move last word of Line 1 down to Line 2"
+                                          className="px-1.5 py-0.5 rounded bg-[#1F222B] hover:bg-[#2A2E3A] text-zinc-300 text-[9px] font-semibold cursor-pointer"
+                                        >
+                                          ↓ Word to L2
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            const l2Tokens = effectiveLine2Text
+                                              .trim()
+                                              .split(/\s+/)
+                                              .filter(Boolean);
+                                            if (l2Tokens.length > 0) {
+                                              const moved = l2Tokens.shift()!;
+                                              const next1 = [effectiveLine1Text.trim(), moved]
+                                                .filter(Boolean)
+                                                .join(' ');
+                                              const next2 = l2Tokens.join(' ');
+                                              handleCommitMultiLineEdit(
+                                                next1,
+                                                next2,
+                                                effectiveLine3Text,
+                                                segMaxLines
+                                              );
+                                            }
+                                          }}
+                                          title="Move first word of Line 2 up to Line 1"
+                                          className="px-1.5 py-0.5 rounded bg-[#1F222B] hover:bg-[#2A2E3A] text-zinc-300 text-[9px] font-semibold cursor-pointer"
+                                        >
+                                          ↑ Word to L1
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            handleCommitMultiLineEdit(
+                                              effectiveLine2Text,
+                                              effectiveLine1Text,
+                                              effectiveLine3Text,
+                                              segMaxLines
+                                            )
+                                          }
+                                          title="Swap Line 1 and Line 2 text"
+                                          className="px-1.5 py-0.5 rounded bg-[#1F222B] hover:bg-[#2A2E3A] text-zinc-300 text-[9px] font-semibold cursor-pointer"
+                                        >
+                                          ⇅ Swap
+                                        </button>
+                                      </>
+                                    )}
+                                    <button
+                                      type="button"
+                                      onClick={() => setEditingSegmentId(null)}
+                                      className="px-2.5 py-0.5 rounded-md bg-[#24B47E] text-[#050505] text-[10px] font-bold cursor-pointer"
+                                    >
+                                      Done
+                                    </button>
+                                  </div>
+                                </div>
+
+                                {/* Separate Editable Inputs + Per-Line Style (-/+ px, Bold, Italic, Shine, Color) for Line 1, Line 2, Line 3 */}
+                                <div className="space-y-1.5">
+                                  {[1, 2, 3]
+                                    .slice(0, segMaxLines)
+                                    .map((lineIdx) => {
+                                      const lineTextVal =
+                                        lineIdx === 1
+                                          ? effectiveLine1Text
+                                          : lineIdx === 2
+                                          ? effectiveLine2Text
+                                          : effectiveLine3Text;
+                                      const baseFontPx =
+                                        lineOverride.fontSize ||
+                                        styleConfig.fontSize ||
+                                        48;
+                                      const curLineFontPx =
+                                        lineIdx === 1
+                                          ? seg.line1FontSizePx ??
+                                            lineOverride.line1FontSizePx ??
+                                            styleConfig.line1FontSizePx ??
+                                            baseFontPx
+                                          : lineIdx === 2
+                                          ? seg.line2FontSizePx ??
+                                            lineOverride.line2FontSizePx ??
+                                            styleConfig.line2FontSizePx ??
+                                            baseFontPx
+                                          : seg.line3FontSizePx ??
+                                            lineOverride.line3FontSizePx ??
+                                            styleConfig.line3FontSizePx ??
+                                            baseFontPx;
+                                      const isLineBold =
+                                        lineIdx === 1
+                                          ? Boolean(
+                                              lineOverride.line1Bold ??
+                                                styleConfig.line1Bold
+                                            )
+                                          : lineIdx === 2
+                                          ? Boolean(
+                                              lineOverride.line2Bold ??
+                                                styleConfig.line2Bold
+                                            )
+                                          : Boolean(
+                                              lineOverride.line3Bold ??
+                                                styleConfig.line3Bold
+                                            );
+                                      const isLineItalic =
+                                        lineIdx === 1
+                                          ? Boolean(
+                                              lineOverride.line1Italic ??
+                                                styleConfig.line1Italic
+                                            )
+                                          : lineIdx === 2
+                                          ? Boolean(
+                                              lineOverride.line2Italic ??
+                                                styleConfig.line2Italic
+                                            )
+                                          : Boolean(
+                                              lineOverride.line3Italic ??
+                                                styleConfig.line3Italic
+                                            );
+                                      const isLineShine =
+                                        lineIdx === 1
+                                          ? Boolean(
+                                              lineOverride.line1Shine ??
+                                                styleConfig.line1Shine
+                                            )
+                                          : lineIdx === 2
+                                          ? Boolean(
+                                              lineOverride.line2Shine ??
+                                                styleConfig.line2Shine
+                                            )
+                                          : Boolean(
+                                              lineOverride.line3Shine ??
+                                                styleConfig.line3Shine
+                                            );
+                                      const curLineColor =
+                                        lineIdx === 1
+                                          ? lineOverride.line1Color ||
+                                            styleConfig.line1Color ||
+                                            '#FFFFFF'
+                                          : lineIdx === 2
+                                          ? lineOverride.line2Color ||
+                                            styleConfig.line2Color ||
+                                            '#FFFFFF'
+                                          : lineOverride.line3Color ||
+                                            styleConfig.line3Color ||
+                                            '#FFFFFF';
+
+                                      const updateSegLineOverride = (
+                                        ovPatch: Partial<LineStyleOverride>,
+                                        segPatch?: Partial<CaptionSegment>
+                                      ) => {
+                                        onUpdateSegmentMeta?.(seg.id, {
+                                          ...(segPatch || {}),
+                                          lineStyleOverride: {
+                                            ...lineOverride,
+                                            ...ovPatch,
+                                          },
+                                        });
+                                      };
+
+                                      return (
+                                        <div
+                                          key={`edit-line-${seg.id}-${lineIdx}`}
+                                          className="flex flex-wrap sm:flex-nowrap items-center gap-1.5"
+                                        >
+                                          <span className="px-1.5 py-1 rounded bg-[#24B47E]/15 border border-[#24B47E]/40 text-[#34D399] font-mono font-bold text-[10px] shrink-0">
+                                            L{lineIdx}
+                                          </span>
+                                          <input
+                                            type="text"
+                                            value={lineTextVal}
+                                            autoFocus={lineIdx === 1}
+                                            placeholder={`Edit Line ${lineIdx} text...`}
+                                            onChange={(e) => {
+                                              const val = e.target.value;
+                                              if (segMaxLines === 1) {
+                                                onUpdateSegmentText(
+                                                  seg.id,
+                                                  styleConfig.primaryTrack,
+                                                  val
+                                                );
+                                              } else if (lineIdx === 1) {
+                                                handleCommitMultiLineEdit(
+                                                  val,
+                                                  effectiveLine2Text,
+                                                  effectiveLine3Text,
+                                                  segMaxLines
+                                                );
+                                              } else if (lineIdx === 2) {
+                                                handleCommitMultiLineEdit(
+                                                  effectiveLine1Text,
+                                                  val,
+                                                  effectiveLine3Text,
+                                                  segMaxLines
+                                                );
+                                              } else {
+                                                handleCommitMultiLineEdit(
+                                                  effectiveLine1Text,
+                                                  effectiveLine2Text,
+                                                  val,
+                                                  segMaxLines
+                                                );
+                                              }
+                                            }}
+                                            onKeyDown={(e) => {
+                                              if (e.key === 'Enter') {
+                                                setEditingSegmentId(null);
+                                              }
+                                            }}
+                                            className="flex-1 min-w-[130px] bg-[#0F1117] text-white text-xs px-2.5 py-1.5 rounded-lg border border-white/15 focus:outline-none focus:border-[#24B47E]"
+                                          />
+
+                                          {/* Per-Line Size (- / px / +) & Style (B / I / ✦ / Color) */}
+                                          <div className="flex items-center gap-1 shrink-0">
+                                            <div className="flex items-center bg-[#0F1117] rounded-md border border-white/10">
+                                              <button
+                                                type="button"
+                                                onClick={() => {
+                                                  const next = Math.max(
+                                                    16,
+                                                    curLineFontPx - 2
+                                                  );
+                                                  if (lineIdx === 1) {
+                                                    updateSegLineOverride(
+                                                      { line1FontSizePx: next },
+                                                      { line1FontSizePx: next }
+                                                    );
+                                                  } else if (lineIdx === 2) {
+                                                    updateSegLineOverride(
+                                                      { line2FontSizePx: next },
+                                                      { line2FontSizePx: next }
+                                                    );
+                                                  } else {
+                                                    updateSegLineOverride(
+                                                      { line3FontSizePx: next },
+                                                      { line3FontSizePx: next }
+                                                    );
+                                                  }
+                                                }}
+                                                title={`Decrease Line ${lineIdx} size`}
+                                                className="px-1.5 py-0.5 text-zinc-400 hover:text-white font-bold text-[10px] cursor-pointer"
+                                              >
+                                                -
+                                              </button>
+                                              <span className="text-[10px] font-mono font-bold text-white px-1">
+                                                {curLineFontPx}px
+                                              </span>
+                                              <button
+                                                type="button"
+                                                onClick={() => {
+                                                  const next = Math.min(
+                                                    130,
+                                                    curLineFontPx + 2
+                                                  );
+                                                  if (lineIdx === 1) {
+                                                    updateSegLineOverride(
+                                                      { line1FontSizePx: next },
+                                                      { line1FontSizePx: next }
+                                                    );
+                                                  } else if (lineIdx === 2) {
+                                                    updateSegLineOverride(
+                                                      { line2FontSizePx: next },
+                                                      { line2FontSizePx: next }
+                                                    );
+                                                  } else {
+                                                    updateSegLineOverride(
+                                                      { line3FontSizePx: next },
+                                                      { line3FontSizePx: next }
+                                                    );
+                                                  }
+                                                }}
+                                                title={`Increase Line ${lineIdx} size`}
+                                                className="px-1.5 py-0.5 text-zinc-400 hover:text-white font-bold text-[10px] cursor-pointer"
+                                              >
+                                                +
+                                              </button>
+                                            </div>
+
+                                            <button
+                                              type="button"
+                                              onClick={() =>
+                                                updateSegLineOverride(
+                                                  lineIdx === 1
+                                                    ? { line1Bold: !isLineBold }
+                                                    : lineIdx === 2
+                                                    ? { line2Bold: !isLineBold }
+                                                    : { line3Bold: !isLineBold }
+                                                )
+                                              }
+                                              title={`Line ${lineIdx} Bold`}
+                                              className={`px-1.5 py-1 rounded text-[10px] font-extrabold border cursor-pointer ${
+                                                isLineBold
+                                                  ? 'bg-[#24B47E] text-[#050505] border-[#24B47E]'
+                                                  : 'bg-[#0F1117] text-zinc-400 border-white/10 hover:text-white'
+                                              }`}
+                                            >
+                                              B
+                                            </button>
+
+                                            <button
+                                              type="button"
+                                              onClick={() =>
+                                                updateSegLineOverride(
+                                                  lineIdx === 1
+                                                    ? { line1Italic: !isLineItalic }
+                                                    : lineIdx === 2
+                                                    ? { line2Italic: !isLineItalic }
+                                                    : { line3Italic: !isLineItalic }
+                                                )
+                                              }
+                                              title={`Line ${lineIdx} Italic`}
+                                              className={`px-1.5 py-1 rounded text-[10px] italic font-serif font-bold border cursor-pointer ${
+                                                isLineItalic
+                                                  ? 'bg-[#24B47E] text-[#050505] border-[#24B47E]'
+                                                  : 'bg-[#0F1117] text-zinc-400 border-white/10 hover:text-white'
+                                              }`}
+                                            >
+                                              I
+                                            </button>
+
+                                            <button
+                                              type="button"
+                                              onClick={() =>
+                                                updateSegLineOverride(
+                                                  lineIdx === 1
+                                                    ? { line1Shine: !isLineShine }
+                                                    : lineIdx === 2
+                                                    ? { line2Shine: !isLineShine }
+                                                    : { line3Shine: !isLineShine }
+                                                )
+                                              }
+                                              title={`Line ${lineIdx} Metallic Shine`}
+                                              className={`px-1.5 py-1 rounded text-[10px] font-bold border cursor-pointer ${
+                                                isLineShine
+                                                  ? 'bg-amber-400 text-[#050505] border-amber-300'
+                                                  : 'bg-[#0F1117] text-zinc-400 border-white/10 hover:text-amber-300'
+                                              }`}
+                                            >
+                                              ✦
+                                            </button>
+
+                                            <label
+                                              title={`Line ${lineIdx} Color`}
+                                              className="w-4 h-4 rounded border border-white/25 cursor-pointer shrink-0 overflow-hidden"
+                                              style={{ backgroundColor: curLineColor }}
+                                            >
+                                              <input
+                                                type="color"
+                                                value={curLineColor}
+                                                onChange={(e) =>
+                                                  updateSegLineOverride(
+                                                    lineIdx === 1
+                                                      ? { line1Color: e.target.value }
+                                                      : lineIdx === 2
+                                                      ? { line2Color: e.target.value }
+                                                      : { line3Color: e.target.value }
+                                                  )
+                                                }
+                                                className="opacity-0 w-0 h-0"
+                                              />
+                                            </label>
+                                          </div>
+                                        </div>
+                                      );
+                                    })}
+                                </div>
                               </div>
                             ) : (
                               <div
-                                className="flex flex-wrap items-center gap-1.5 min-w-0"
+                                className="flex flex-col gap-1 min-w-0 flex-1"
                                 onDoubleClick={(e) => {
                                   e.stopPropagation();
                                   setEditingSegmentId(seg.id);
                                 }}
                               >
-                                {primaryWords.map((w, wIdx) => {
-                                  const isWordSelected =
-                                    selectedWordRef?.segmentId === seg.id &&
-                                    selectedWordRef?.wordIndex === wIdx;
-                                  const isHighlightedGreen = Boolean(w.isHero);
-
-                                  return (
-                                    <button
-                                      key={`${seg.id}-w-${wIdx}`}
-                                      type="button"
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        onSeekTo(seg.startTime + 0.02);
-                                        onToggleWordHero(
-                                          seg.id,
-                                          styleConfig.primaryTrack,
-                                          wIdx
-                                        );
-                                        setSelectedWordRef({
-                                          segmentId: seg.id,
-                                          wordIndex: wIdx,
-                                        });
-                                        if (
-                                          Boolean(styleConfig.autoSfxEnabled) &&
-                                          seg.sfxType &&
-                                          seg.sfxType !== 'none'
-                                        ) {
-                                          playOpenSourceSoundEffect(
-                                            seg.sfxType,
-                                            styleConfig.sfxVolume ?? 0.4
-                                          );
-                                        }
-                                      }}
-                                      title="Click to toggle green emphasis · Double-click row to edit text"
-                                      className={`text-[14px] leading-snug transition-all cursor-pointer ${
-                                        isActive && isHighlightedGreen
-                                          ? 'px-2.5 py-0.5 rounded-md bg-[#163326] text-white border border-white/85 font-medium shadow-sm'
-                                          : isHighlightedGreen
-                                          ? 'px-2 py-0.5 rounded-md bg-[#132E22] text-[#34D399] border border-[#2BAE66]/40 font-medium'
-                                          : isWordSelected
-                                          ? 'px-2 py-0.5 rounded-md bg-white/10 text-white border border-white/40'
-                                          : 'px-1 py-0.5 rounded text-zinc-100 hover:bg-white/[0.06]'
-                                      }`}
-                                      style={
-                                        w.customColor ? { color: w.customColor } : undefined
-                                      }
+                                {lineWordGroups
+                                  .filter((grp) => grp.items.length > 0)
+                                  .map((grp) => (
+                                    <div
+                                      key={`${seg.id}-linegrp-${grp.lineNum}`}
+                                      className="flex flex-wrap items-center gap-1.5 min-w-0"
                                     >
-                                      {w.word}
-                                    </button>
-                                  );
-                                })}
+                                      {segMaxLines >= 2 &&
+                                        lineWordGroups.filter((g) => g.items.length > 0)
+                                          .length >= 2 && (
+                                          <button
+                                            type="button"
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              setEditingSegmentId(seg.id);
+                                            }}
+                                            title={`Click to edit Line ${grp.lineNum} text & style`}
+                                            className="px-1.5 py-0.5 rounded bg-[#1B1E26] hover:bg-[#24B47E]/20 text-[9px] font-mono font-bold text-[#34D399] border border-white/10 shrink-0 cursor-pointer"
+                                          >
+                                            L{grp.lineNum}
+                                          </button>
+                                        )}
+                                      {grp.items.map(({ w, wIdx }) => {
+                                        const isWordSelected =
+                                          selectedWordRef?.segmentId === seg.id &&
+                                          selectedWordRef?.wordIndex === wIdx;
+                                        const isHighlightedGreen = Boolean(w.isHero);
+
+                                        return (
+                                          <button
+                                            key={`${seg.id}-w-${wIdx}`}
+                                            type="button"
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              onSeekTo(seg.startTime + 0.02);
+                                              setSelectedWordRef((prev) =>
+                                                prev?.segmentId === seg.id &&
+                                                prev?.wordIndex === wIdx
+                                                  ? null
+                                                  : {
+                                                      segmentId: seg.id,
+                                                      wordIndex: wIdx,
+                                                    }
+                                              );
+                                              if (
+                                                Boolean(styleConfig.autoSfxEnabled) &&
+                                                seg.sfxType &&
+                                                seg.sfxType !== 'none'
+                                              ) {
+                                                playOpenSourceSoundEffect(
+                                                  seg.sfxType,
+                                                  styleConfig.sfxVolume ?? 0.4
+                                                );
+                                              }
+                                            }}
+                                            title="Click word to style (Bold, Italic, Shine, Size, Hero, Color) · Double-click row to edit lines"
+                                            className={`text-[14px] leading-snug transition-all cursor-pointer inline-flex items-center gap-1 ${
+                                              w.isBold ? 'font-extrabold' : 'font-medium'
+                                            } ${w.isItalic ? 'italic' : ''} ${
+                                              w.isUnderlined ? 'underline' : ''
+                                            } ${
+                                              w.isShine
+                                                ? 'ring-1 ring-amber-400/70 bg-amber-400/10 text-amber-200 px-2 py-0.5 rounded-md'
+                                                : isActive && isHighlightedGreen
+                                                ? 'px-2.5 py-0.5 rounded-md bg-[#163326] text-white border border-white/85 shadow-sm'
+                                                : isHighlightedGreen
+                                                ? 'px-2 py-0.5 rounded-md bg-[#132E22] text-[#34D399] border border-[#2BAE66]/40'
+                                                : isWordSelected
+                                                ? 'px-2 py-0.5 rounded-md bg-[#24B47E]/20 text-white border border-[#24B47E]'
+                                                : 'px-1 py-0.5 rounded text-zinc-100 hover:bg-white/[0.06]'
+                                            }`}
+                                            style={
+                                              w.customColor
+                                                ? { color: w.customColor }
+                                                : undefined
+                                            }
+                                          >
+                                            <span>{w.word}</span>
+                                            {w.isShine && (
+                                              <span className="text-[9px] text-amber-300 leading-none">
+                                                ✦
+                                              </span>
+                                            )}
+                                          </button>
+                                        );
+                                      })}
+                                    </div>
+                                  ))}
                               </div>
                             )}
                           </div>
 
-                          {/* RIGHT: Minimal Kalakar Per-Line Action Icons (Edit ✎, Arch ⌒, Move/Spread ✥, Behind Subject 🧍, Template ⊞) */}
+                          {/* RIGHT: Minimal Kalakar Per-Line Action Icons (Lines 1L/2L/3L, Edit ✎, Arch ⌒, Move/Spread ✥, Behind Subject 🧍, Template ⊞) */}
                           <div
-                            className="flex items-center gap-1.5 text-zinc-400 shrink-0"
+                            className="flex items-center gap-1 text-zinc-400 shrink-0"
                             onClick={(e) => e.stopPropagation()}
                           >
-                            {/* 0. Edit Line Text (✎) */}
+                            {/* Quick Cycle 1L / 2L / 3L on this caption segment */}
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const nextLines: 1 | 2 | 3 =
+                                  segMaxLines === 1 ? 2 : segMaxLines === 2 ? 3 : 1;
+                                const split2 = splitSegmentIntoTwoLines(
+                                  seg,
+                                  styleConfig.primaryTrack,
+                                  nextLines
+                                );
+                                onUpdateSegmentMeta?.(seg.id, {
+                                  maxLines: nextLines,
+                                  customLine1Text:
+                                    nextLines >= 2
+                                      ? seg.customLine1Text ?? split2.line1Text
+                                      : undefined,
+                                  customLine2Text:
+                                    nextLines >= 2
+                                      ? seg.customLine2Text ?? split2.line2Text
+                                      : undefined,
+                                  lineStyleOverride: {
+                                    ...lineOverride,
+                                    maxLines: nextLines,
+                                  },
+                                });
+                              }}
+                              title={`Caption Line Count: ${segMaxLines} ${
+                                segMaxLines === 1 ? 'Line' : 'Lines'
+                              } (Click to switch 1L / 2L / 3L)`}
+                              className={`px-1.5 py-0.5 rounded text-[10px] font-mono font-bold transition-colors cursor-pointer border ${
+                                segMaxLines >= 2
+                                  ? 'text-[#34D399] bg-[#163326] border-[#24B47E]/40'
+                                  : 'text-zinc-400 border-white/10 hover:text-white hover:bg-white/[0.06]'
+                              }`}
+                            >
+                              {segMaxLines}L
+                            </button>
+
+                            {/* 0. Edit Line Text (✎) — Opens Multi-Line Editor for Line 1, Line 2, Line 3 */}
                             <button
                               type="button"
                               onClick={() =>
@@ -1720,7 +2656,7 @@ export const TranscriptLanguagePanel: React.FC<TranscriptLanguagePanelProps> = (
                                   prev === seg.id ? null : seg.id
                                 )
                               }
-                              title="Edit words in this caption line"
+                              title="Edit Line 1 & Line 2 text and per-line styles"
                               className={`p-1 rounded-md transition-colors cursor-pointer ${
                                 isEditingLine
                                   ? 'text-[#34D399] bg-[#163326]'
@@ -1729,26 +2665,48 @@ export const TranscriptLanguagePanel: React.FC<TranscriptLanguagePanelProps> = (
                             >
                               <Edit3 className="w-3.5 h-3.5" />
                             </button>
-                            {/* 1. Curve into an arch (⌒) */}
+                            {/* 1. Curve into an arch / 180° / 360° / Reversed (⌒) */}
                             <button
                               type="button"
-                              onClick={() =>
-                                onUpdateSegmentMeta?.(seg.id, {
-                                  arcCurveDeg: curArcDeg !== 0 ? 0 : 22,
-                                })
-                              }
+                              onClick={() => {
+                                onSeekTo(seg.startTime + 0.02);
+                                if (curArcDeg === 0) {
+                                  onUpdateSegmentMeta?.(seg.id, {
+                                    arcCurveDeg: 180,
+                                  });
+                                  setOpenCurveSegId(seg.id);
+                                } else if (!isCurveOpen) {
+                                  setOpenCurveSegId(seg.id);
+                                } else {
+                                  onUpdateSegmentMeta?.(seg.id, {
+                                    arcCurveDeg: 0,
+                                  });
+                                  setOpenCurveSegId(null);
+                                }
+                              }}
                               title={
                                 curArcDeg !== 0
-                                  ? 'Flatten this line'
-                                  : 'Curve into an arch'
+                                  ? `Text Curve Active (${curArcDeg > 0 ? `+${curArcDeg}` : curArcDeg}°) — Click to adjust or flatten`
+                                  : 'Enable Text Curve (180° / 360° / Reversed & custom curve angle)'
                               }
-                              className={`p-1 rounded-md transition-colors cursor-pointer ${
-                                curArcDeg !== 0
-                                  ? 'text-[#34D399] bg-[#163326]'
+                              className={`px-1.5 py-1 rounded-md transition-colors cursor-pointer flex items-center gap-1 ${
+                                curArcDeg !== 0 || isCurveOpen
+                                  ? 'text-[#34D399] bg-[#163326] border border-[#24B47E]/50'
                                   : 'hover:text-white hover:bg-white/[0.06]'
                               }`}
                             >
-                              <span className="text-xs font-bold leading-none">⌒</span>
+                              <span
+                                className={`text-xs font-bold leading-none inline-block transition-transform ${
+                                  curArcDeg < 0 ? 'rotate-180' : ''
+                                }`}
+                              >
+                                ⌒
+                              </span>
+                              {curArcDeg !== 0 && (
+                                <span className="text-[9px] font-mono font-bold leading-none">
+                                  {curArcDeg > 0 ? `+${curArcDeg}°` : `${curArcDeg}°`}
+                                </span>
+                              )}
                             </button>
 
                             {/* 2. Spread / Move words across line (✥) */}
@@ -1841,6 +2799,407 @@ export const TranscriptLanguagePanel: React.FC<TranscriptLanguagePanelProps> = (
                             </button>
                           </div>
                         </div>
+
+                        {/* INLINE PER-WORD STYLE BAR (Bold, Italic, Shine, Size -/+, Hero, Color) when a word chip is clicked */}
+                        {selectedWordInThisSeg && (
+                          <div
+                            onClick={(e) => e.stopPropagation()}
+                            className="mt-2 p-2 rounded-xl bg-[#141918] border border-[#24B47E]/45 flex flex-wrap items-center justify-between gap-2 text-[11px] shadow-md"
+                          >
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <span className="px-2 py-0.5 rounded bg-[#163326] text-[#34D399] font-bold text-[10px] border border-[#24B47E]/40">
+                                Word: &ldquo;{selectedWordInThisSeg.wordObj.word}&rdquo;
+                              </span>
+
+                              {/* Word Bold */}
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  onUpdateWordStyle?.(
+                                    seg.id,
+                                    styleConfig.primaryTrack,
+                                    selectedWordInThisSeg.wordIndex,
+                                    {
+                                      isBold: !selectedWordInThisSeg.wordObj.isBold,
+                                    }
+                                  )
+                                }
+                                className={`px-2 py-0.5 rounded font-extrabold text-[10px] border cursor-pointer ${
+                                  selectedWordInThisSeg.wordObj.isBold
+                                    ? 'bg-[#24B47E] text-[#050505] border-[#24B47E]'
+                                    : 'bg-[#181B20] text-zinc-300 border-white/10 hover:text-white'
+                                }`}
+                              >
+                                B Bold
+                              </button>
+
+                              {/* Word Italic */}
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  onUpdateWordStyle?.(
+                                    seg.id,
+                                    styleConfig.primaryTrack,
+                                    selectedWordInThisSeg.wordIndex,
+                                    {
+                                      isItalic: !selectedWordInThisSeg.wordObj.isItalic,
+                                    }
+                                  )
+                                }
+                                className={`px-2 py-0.5 rounded italic font-serif font-bold text-[10px] border cursor-pointer ${
+                                  selectedWordInThisSeg.wordObj.isItalic
+                                    ? 'bg-[#24B47E] text-[#050505] border-[#24B47E]'
+                                    : 'bg-[#181B20] text-zinc-300 border-white/10 hover:text-white'
+                                }`}
+                              >
+                                I Italic
+                              </button>
+
+                              {/* Word Shine */}
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  onUpdateWordStyle?.(
+                                    seg.id,
+                                    styleConfig.primaryTrack,
+                                    selectedWordInThisSeg.wordIndex,
+                                    {
+                                      isShine: !selectedWordInThisSeg.wordObj.isShine,
+                                    }
+                                  )
+                                }
+                                className={`px-2 py-0.5 rounded font-bold text-[10px] border cursor-pointer ${
+                                  selectedWordInThisSeg.wordObj.isShine
+                                    ? 'bg-amber-400 text-[#050505] border-amber-300'
+                                    : 'bg-[#181B20] text-zinc-300 border-white/10 hover:text-amber-300'
+                                }`}
+                              >
+                                ✦ Shine
+                              </button>
+
+                              {/* Word Hero Emphasis */}
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  onToggleWordHero(
+                                    seg.id,
+                                    styleConfig.primaryTrack,
+                                    selectedWordInThisSeg.wordIndex
+                                  )
+                                }
+                                className={`px-2 py-0.5 rounded font-bold text-[10px] border cursor-pointer ${
+                                  selectedWordInThisSeg.wordObj.isHero
+                                    ? 'bg-[#163326] text-[#34D399] border-[#24B47E]'
+                                    : 'bg-[#181B20] text-zinc-300 border-white/10 hover:text-white'
+                                }`}
+                              >
+                                ★ Hero
+                              </button>
+
+                              {/* Word Underline */}
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  onUpdateWordStyle?.(
+                                    seg.id,
+                                    styleConfig.primaryTrack,
+                                    selectedWordInThisSeg.wordIndex,
+                                    {
+                                      isUnderlined:
+                                        !selectedWordInThisSeg.wordObj.isUnderlined,
+                                    }
+                                  )
+                                }
+                                className={`px-2 py-0.5 rounded underline font-bold text-[10px] border cursor-pointer ${
+                                  selectedWordInThisSeg.wordObj.isUnderlined
+                                    ? 'bg-[#24B47E] text-[#050505] border-[#24B47E]'
+                                    : 'bg-[#181B20] text-zinc-300 border-white/10 hover:text-white'
+                                }`}
+                              >
+                                U
+                              </button>
+
+                              {/* Word Scale Decrease / Increase (- / 100% / +) */}
+                              <div className="flex items-center bg-[#181B20] rounded border border-white/10">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const cur =
+                                      selectedWordInThisSeg.wordObj.scaleMultiplier ?? 1;
+                                    const next = Number(
+                                      Math.max(0.6, cur - 0.1).toFixed(2)
+                                    );
+                                    onUpdateWordStyle?.(
+                                      seg.id,
+                                      styleConfig.primaryTrack,
+                                      selectedWordInThisSeg.wordIndex,
+                                      { scaleMultiplier: next }
+                                    );
+                                  }}
+                                  title="Decrease this word's size"
+                                  className="px-1.5 py-0.5 text-zinc-400 hover:text-white font-bold text-[10px] cursor-pointer"
+                                >
+                                  -
+                                </button>
+                                <span className="text-[9px] font-mono font-bold text-white px-1">
+                                  {Math.round(
+                                    (selectedWordInThisSeg.wordObj.scaleMultiplier ??
+                                      1) * 100
+                                  )}
+                                  %
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const cur =
+                                      selectedWordInThisSeg.wordObj.scaleMultiplier ?? 1;
+                                    const next = Number(
+                                      Math.min(2.2, cur + 0.1).toFixed(2)
+                                    );
+                                    onUpdateWordStyle?.(
+                                      seg.id,
+                                      styleConfig.primaryTrack,
+                                      selectedWordInThisSeg.wordIndex,
+                                      { scaleMultiplier: next }
+                                    );
+                                  }}
+                                  title="Increase this word's size"
+                                  className="px-1.5 py-0.5 text-zinc-400 hover:text-white font-bold text-[10px] cursor-pointer"
+                                >
+                                  +
+                                </button>
+                              </div>
+
+                              {/* Word Color Swatches */}
+                              <div className="flex items-center gap-1">
+                                {[
+                                  '#FFFFFF',
+                                  '#FDE047',
+                                  '#34D399',
+                                  '#FF5722',
+                                  '#38BDF8',
+                                ].map((hex) => (
+                                  <button
+                                    key={`w-color-${hex}`}
+                                    type="button"
+                                    onClick={() =>
+                                      onUpdateWordStyle?.(
+                                        seg.id,
+                                        styleConfig.primaryTrack,
+                                        selectedWordInThisSeg.wordIndex,
+                                        { customColor: hex }
+                                      )
+                                    }
+                                    className="w-3.5 h-3.5 rounded-full border border-white/30 cursor-pointer"
+                                    style={{ backgroundColor: hex }}
+                                  />
+                                ))}
+                              </div>
+                            </div>
+
+                            <div className="flex items-center gap-1">
+                              <button
+                                type="button"
+                                onClick={() => setEditingSegmentId(seg.id)}
+                                className="px-2 py-0.5 rounded bg-[#181B20] hover:bg-[#24B47E] text-zinc-200 hover:text-[#050505] text-[10px] font-bold border border-white/10 cursor-pointer"
+                              >
+                                ✎ Edit Lines
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setSelectedWordRef(null)}
+                                className="p-0.5 text-zinc-400 hover:text-white cursor-pointer"
+                              >
+                                <X className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* INLINE TEXT CURVE OPTIONS BAR (180°, 360°, Reverse & Custom Angle Slider) */}
+                        {isCurveOpen && (
+                          <div
+                            onClick={(e) => e.stopPropagation()}
+                            className="mt-2.5 p-2.5 rounded-xl bg-[#121615] border border-[#24B47E]/45 space-y-2 text-[11px] shadow-lg"
+                          >
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <div className="flex items-center gap-2">
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-[#163326] text-[#34D399] font-bold text-[10px] border border-[#24B47E]/40">
+                                  <span
+                                    className={`inline-block transition-transform ${
+                                      curArcDeg < 0 ? 'rotate-180' : ''
+                                    }`}
+                                  >
+                                    ⌒
+                                  </span>
+                                  <span>
+                                    Line #{displayNum} Curve:{' '}
+                                    {curArcDeg > 0
+                                      ? `+${curArcDeg}°`
+                                      : `${curArcDeg}°`}{' '}
+                                    {curArcDeg > 0
+                                      ? '(Arch)'
+                                      : curArcDeg < 0
+                                      ? '(Reversed)'
+                                      : '(Flat)'}
+                                  </span>
+                                </span>
+
+                                {/* Reverse Curve Angle Button */}
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const nextAngle =
+                                      curArcDeg === 0 ? -180 : -curArcDeg;
+                                    onSeekTo(seg.startTime + 0.02);
+                                    onUpdateSegmentMeta?.(seg.id, {
+                                      arcCurveDeg: nextAngle,
+                                    });
+                                  }}
+                                  title="Reverse / Flip Curve Direction (Positive Arch ↔ Negative Valley)"
+                                  className="px-2 py-0.5 rounded-md bg-[#1D2422] hover:bg-[#24B47E] text-zinc-200 hover:text-[#050505] font-bold text-[10px] border border-white/10 transition-colors cursor-pointer flex items-center gap-1"
+                                >
+                                  <span>⇄ Reverse Curve</span>
+                                </button>
+                              </div>
+
+                              <div className="flex items-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const degToApply =
+                                      curArcDeg === 0 ? 180 : curArcDeg;
+                                    onUpdateStyle?.({
+                                      arcEnabled: true,
+                                      arcCurveDeg: degToApply,
+                                    });
+                                    segments.forEach((s) => {
+                                      onUpdateSegmentMeta?.(s.id, {
+                                        arcCurveDeg: degToApply,
+                                      });
+                                    });
+                                  }}
+                                  title="Apply this curve angle to all caption lines in the reel"
+                                  className="px-2 py-0.5 rounded-md bg-[#1B1D22] hover:bg-[#262930] text-zinc-300 hover:text-white text-[10px] font-semibold border border-white/10 cursor-pointer"
+                                >
+                                  Apply All
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    onUpdateSegmentMeta?.(seg.id, {
+                                      arcCurveDeg: 0,
+                                    });
+                                    if (styleConfig.arcEnabled) {
+                                      onUpdateStyle?.({
+                                        arcEnabled: false,
+                                        arcCurveDeg: 0,
+                                      });
+                                    }
+                                    setOpenCurveSegId(null);
+                                  }}
+                                  className="px-2 py-0.5 rounded-md bg-rose-500/15 hover:bg-rose-600 text-rose-300 hover:text-white text-[10px] font-bold border border-rose-500/30 cursor-pointer"
+                                >
+                                  Flatten (0°)
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setOpenCurveSegId(null)}
+                                  title="Close curve controls"
+                                  className="p-0.5 rounded text-zinc-400 hover:text-white cursor-pointer"
+                                >
+                                  <X className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            </div>
+
+                            {/* Preset Curve Angles: 180°, 360°, Reversed -180°, -360°, 90°, 45° */}
+                            <div className="flex flex-wrap items-center gap-1">
+                              {[
+                                { deg: 45, label: '+45° Arch' },
+                                { deg: 90, label: '+90° Arch' },
+                                { deg: 180, label: '180° Half Circle' },
+                                { deg: 360, label: '360° Full Circle' },
+                                { deg: -90, label: '-90° Rev' },
+                                { deg: -180, label: '-180° Reversed' },
+                                { deg: -360, label: '-360° Rev Circle' },
+                              ].map((preset) => {
+                                const isPresetActive = curArcDeg === preset.deg;
+                                return (
+                                  <button
+                                    key={`curve-preset-${seg.id}-${preset.deg}`}
+                                    type="button"
+                                    onClick={() => {
+                                      onSeekTo(seg.startTime + 0.02);
+                                      onUpdateSegmentMeta?.(seg.id, {
+                                        arcCurveDeg: preset.deg,
+                                      });
+                                    }}
+                                    className={`px-2 py-1 rounded-md text-[10px] font-bold transition-colors cursor-pointer border ${
+                                      isPresetActive
+                                        ? 'bg-[#24B47E] text-[#050505] border-[#24B47E]'
+                                        : 'bg-[#181B1A] text-zinc-300 border-white/[0.08] hover:border-[#24B47E]/50 hover:text-white'
+                                    }`}
+                                  >
+                                    {preset.label}
+                                  </button>
+                                );
+                              })}
+                            </div>
+
+                            {/* Continuous How Much Curve Slider (-360° to +360°) */}
+                            <div className="flex items-center gap-2.5 pt-0.5">
+                              <span className="text-[10px] text-zinc-400 font-medium shrink-0">
+                                Curve Angle:
+                              </span>
+                              <span className="text-[9px] font-mono text-zinc-500">
+                                -360°
+                              </span>
+                              <input
+                                type="range"
+                                min={-360}
+                                max={360}
+                                step={5}
+                                value={curArcDeg}
+                                onChange={(e) => {
+                                  const nextVal =
+                                    parseInt(e.target.value, 10) || 0;
+                                  onSeekTo(seg.startTime + 0.02);
+                                  onUpdateSegmentMeta?.(seg.id, {
+                                    arcCurveDeg: nextVal,
+                                  });
+                                }}
+                                className="flex-1 accent-[#24B47E] cursor-pointer h-1.5 bg-[#1C2421] rounded-lg"
+                              />
+                              <span className="text-[9px] font-mono text-zinc-500">
+                                +360°
+                              </span>
+                              <div className="flex items-center bg-[#181B1A] border border-white/10 rounded-lg px-2 py-0.5 shrink-0">
+                                <input
+                                  type="number"
+                                  min={-360}
+                                  max={360}
+                                  step={5}
+                                  value={curArcDeg}
+                                  onChange={(e) => {
+                                    const raw = parseInt(e.target.value, 10);
+                                    const clamped = Number.isNaN(raw)
+                                      ? 0
+                                      : Math.max(-360, Math.min(360, raw));
+                                    onSeekTo(seg.startTime + 0.02);
+                                    onUpdateSegmentMeta?.(seg.id, {
+                                      arcCurveDeg: clamped,
+                                    });
+                                  }}
+                                  className="w-11 bg-transparent text-right text-[11px] font-mono font-bold text-white focus:outline-none"
+                                />
+                                <span className="text-[10px] text-zinc-400 ml-0.5">
+                                  °
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+                        )}
 
                         {/* GOLDOX SECTION 3.3: MOTHER / CHILD MAGIC WAND CASCADE BAR */}
                         {activeWandSegId === seg.id && (
